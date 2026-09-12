@@ -18,13 +18,16 @@ import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.Settings;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.text.SimpleDateFormat;
@@ -36,13 +39,19 @@ import java.util.Map;
 public class MainActivity extends Activity {
     private static final int PERMISSION_REQ_CODE = 100;
 
+    // Transcript stays a compact 3-line preview unless the user expands it.
+    private static final int TRANSCRIPT_COLLAPSED_MAX_LINES = 3;
+
     private ImageButton mBtnRecord;
     private TextView mTvTimer;
     private ProgressBar mPbGpuSpinner;
     private LinearLayout mLayoutTranscript;
+    private ScrollView mSvTranscript;
     private EditText mEtTranscript;
     private Button mBtnCopy;
+    private Button mBtnExpand;
     private Button mBtnToggleOverlay;
+    private boolean mTranscriptExpanded = false;
 
     // Slide-Out Drawer Views
     private View mBtnOpenHistory;
@@ -130,8 +139,10 @@ public class MainActivity extends Activity {
         mTvTimer = findViewById(R.id.tv_timer);
         mPbGpuSpinner = findViewById(R.id.pb_gpu_spinner);
         mLayoutTranscript = findViewById(R.id.layout_transcript);
+        mSvTranscript = findViewById(R.id.sv_transcript);
         mEtTranscript = findViewById(R.id.et_transcript);
         mBtnCopy = findViewById(R.id.btn_copy);
+        mBtnExpand = findViewById(R.id.btn_expand);
         mBtnToggleOverlay = findViewById(R.id.btn_toggle_overlay);
 
         // Drawer views
@@ -146,6 +157,13 @@ public class MainActivity extends Activity {
         mDrawerScrim.setOnClickListener(v -> closeDrawer());
 
         mBtnRecord.setOnClickListener(v -> onButtonClicked());
+
+        // Expand / collapse the transcript: dedicated button plus tap-to-toggle
+        // on the transcript text itself.
+        mBtnExpand.setOnClickListener(v -> toggleTranscriptExpanded());
+        mEtTranscript.setOnClickListener(v -> toggleTranscriptExpanded());
+        mSvTranscript.setOnClickListener(v -> toggleTranscriptExpanded());
+        setTranscriptExpanded(false);
 
         mBtnCopy.setOnClickListener(v -> {
             String text = mEtTranscript.getText().toString().trim();
@@ -189,6 +207,80 @@ public class MainActivity extends Activity {
         syncWithServiceState();
     }
 
+    /**
+     * Toggles the transcript between the compact 3-line preview and the full,
+     * scrollable view. The record control is never pushed off-screen: when
+     * expanded the transcript gets a bounded height instead of growing freely.
+     */
+    private void toggleTranscriptExpanded() {
+        setTranscriptExpanded(!mTranscriptExpanded);
+    }
+
+    private void setTranscriptExpanded(boolean expanded) {
+        if (mEtTranscript == null || mSvTranscript == null) return;
+        mTranscriptExpanded = expanded;
+
+        ViewGroup.LayoutParams lp = mSvTranscript.getLayoutParams();
+        if (expanded) {
+            lp.height = computeExpandedTranscriptHeight();
+            mEtTranscript.setMaxLines(Integer.MAX_VALUE);
+            mEtTranscript.setEllipsize(null);
+            if (mBtnExpand != null) mBtnExpand.setText("COLLAPSE");
+        } else {
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            mEtTranscript.setMaxLines(TRANSCRIPT_COLLAPSED_MAX_LINES);
+            mEtTranscript.setEllipsize(TextUtils.TruncateAt.END);
+            mSvTranscript.scrollTo(0, 0);
+            if (mBtnExpand != null) mBtnExpand.setText("EXPAND");
+        }
+        mSvTranscript.setLayoutParams(lp);
+    }
+
+    /**
+     * Height budget for the expanded transcript. Everything else on screen is
+     * measured first — top bar, the record control (timer + 210dp button),
+     * bottom bar, screen padding and the transcript's own chrome — so the
+     * expanded transcript fits underneath the record button instead of
+     * squashing it. When no room is left at all (landscape/multi-window) the
+     * column simply scrolls, which is safe because the dashboard lives in a
+     * fillViewport ScrollView. Falls back to an estimate before first layout.
+     */
+    private int computeExpandedTranscriptHeight() {
+        float density = getResources().getDisplayMetrics().density;
+        View content = findViewById(android.R.id.content);
+        int available = (content != null && content.getHeight() > 0)
+                ? content.getHeight()
+                : getResources().getDisplayMetrics().heightPixels;
+
+        View topBar = findViewById(R.id.top_bar);
+        View bottomBar = findViewById(R.id.bottom_bar);
+        int reserved;
+        if (topBar != null && topBar.getHeight() > 0
+                && bottomBar != null && bottomBar.getHeight() > 0
+                && mTvTimer != null && mTvTimer.getHeight() > 0
+                && mBtnRecord != null && mBtnRecord.getHeight() > 0
+                && mLayoutTranscript != null && mLayoutTranscript.getHeight() > 0
+                && mSvTranscript != null) {
+            int transcriptChrome = Math.max(0, mLayoutTranscript.getHeight() - mSvTranscript.getHeight())
+                    + Math.round(16 * density); // transcript section bottom margin
+            reserved = topBar.getHeight()
+                    + bottomBar.getHeight()
+                    + mTvTimer.getHeight() + Math.round(32 * density) // timer bottom margin
+                    + mBtnRecord.getHeight()
+                    + Math.round(40 * density) // column vertical padding
+                    + transcriptChrome;
+        } else {
+            reserved = Math.round((320 + 56 + 96 + 44 + 40) * density);
+        }
+
+        int room = available - reserved;
+        // Use every spare pixel, but never more than 45% of the screen. If the
+        // record control alone already fills the viewport, keep a usable
+        // transcript and let the outer ScrollView absorb the overflow.
+        int cap = room > 0 ? room : Math.round(96 * density);
+        return Math.min(cap, Math.round(available * 0.45f));
+    }
+
     private void openDrawer() {
         if (mDrawerOpen) return;
         mDrawerOpen = true;
@@ -230,6 +322,28 @@ public class MainActivity extends Activity {
             return;
         }
         super.onBackPressed();
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // MainActivity handles orientation/screenSize itself. Re-cap the
+        // expanded transcript once the new layout has settled, otherwise the
+        // budget would be computed from stale pre-rotation measurements.
+        if (!mTranscriptExpanded || mSvTranscript == null) return;
+        final View content = findViewById(android.R.id.content);
+        if (content == null) return;
+        content.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                       int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                v.removeOnLayoutChangeListener(this);
+                if (!mTranscriptExpanded || mSvTranscript == null) return;
+                ViewGroup.LayoutParams lp = mSvTranscript.getLayoutParams();
+                lp.height = computeExpandedTranscriptHeight();
+                mSvTranscript.setLayoutParams(lp);
+            }
+        });
     }
 
     private void loadHistoryIntoDrawer() {
@@ -389,6 +503,7 @@ public class MainActivity extends Activity {
             if (mEtTranscript != null && mLayoutTranscript != null) {
                 mLayoutTranscript.setVisibility(View.VISIBLE);
                 mEtTranscript.setText(entry.transcript);
+                setTranscriptExpanded(false);
             }
         });
 
@@ -427,6 +542,9 @@ public class MainActivity extends Activity {
                     if (text != null && !text.isEmpty()) {
                         mLayoutTranscript.setVisibility(View.VISIBLE);
                         mEtTranscript.setText(text);
+                        // A fresh transcript always starts as the compact preview
+                        // so the record button stays visible.
+                        setTranscriptExpanded(false);
                         if (mDrawerOpen) {
                             loadHistoryIntoDrawer();
                         }

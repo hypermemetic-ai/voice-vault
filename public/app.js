@@ -12,6 +12,7 @@
   const resultBadge = document.getElementById("resultBadge");
   const transcriptText = document.getElementById("transcriptText");
   const manualCopyBtn = document.getElementById("manualCopyBtn");
+  const expandTranscriptBtn = document.getElementById("expandTranscriptBtn");
   const audioPlayback = document.getElementById("audioPlayback");
 
   let mediaRecorder = null;
@@ -188,6 +189,7 @@
           const text = data.text.trim();
           transcriptText.value = text;
           resultSection.hidden = false;
+          setTranscriptExpanded(false);
           audioPlayback.src = data.audioUrl || URL.createObjectURL(audioBlob);
 
           await copyToClipboard(text);
@@ -219,6 +221,23 @@
     copyToClipboard(transcriptText.value);
     manualCopyBtn.textContent = "COPIED";
     setTimeout(() => manualCopyBtn.textContent = "COPY", 2000);
+  });
+
+  // Compact 3-line transcript preview by default; EXPAND reveals the full
+  // scrollable text, COLLAPSE returns to the preview. The full text always
+  // lives in transcriptText.value, so COPY works in both states.
+  let transcriptExpanded = false;
+
+  function setTranscriptExpanded(expanded) {
+    transcriptExpanded = expanded;
+    transcriptText.classList.toggle("expanded", expanded);
+    expandTranscriptBtn.textContent = expanded ? "COLLAPSE" : "EXPAND";
+    expandTranscriptBtn.setAttribute("aria-expanded", String(expanded));
+    if (!expanded) transcriptText.scrollTop = 0;
+  }
+
+  expandTranscriptBtn.addEventListener("click", () => {
+    setTranscriptExpanded(!transcriptExpanded);
   });
 
   // History Drawer
@@ -318,6 +337,7 @@
             // Also load into transcript editor
             transcriptText.value = rec.transcript;
             resultSection.hidden = false;
+            setTranscriptExpanded(false);
           });
 
           historyList.appendChild(card);
