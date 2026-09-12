@@ -13,3 +13,4 @@ android/release.keystore
 Thumbs.db
 *.tmp
 *.log
+.architect/

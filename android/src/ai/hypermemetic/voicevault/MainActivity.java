@@ -145,7 +145,13 @@ public class MainActivity extends Activity {
                 ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
                 if (cm != null) {
                     ClipData clip = ClipData.newPlainText("Voice Vault", text);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        android.os.PersistableBundle extras = new android.os.PersistableBundle();
+                        extras.putBoolean("com.android.systemui.SUPPRESS_CLIPBOARD_OVERLAY", true);
+                        clip.getDescription().setExtras(extras);
+                    }
                     cm.setPrimaryClip(clip);
+                    VoiceVaultKeyService.autoDismissClipboardOverlay();
                     mBtnCopy.setText("COPIED");
                     mHandler.postDelayed(() -> mBtnCopy.setText("COPY"), 2000);
                 }
@@ -348,7 +354,13 @@ public class MainActivity extends Activity {
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             if (cm != null) {
                 ClipData clip = ClipData.newPlainText("Voice Vault", entry.transcript);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    android.os.PersistableBundle extras = new android.os.PersistableBundle();
+                    extras.putBoolean("com.android.systemui.SUPPRESS_CLIPBOARD_OVERLAY", true);
+                    clip.getDescription().setExtras(extras);
+                }
                 cm.setPrimaryClip(clip);
+                VoiceVaultKeyService.autoDismissClipboardOverlay();
             }
             Vibrator vib = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
             if (vib != null) {

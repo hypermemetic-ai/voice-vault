@@ -401,7 +401,15 @@ public class VoiceVaultService extends Service {
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             if (cm != null) {
                 ClipData clip = ClipData.newPlainText("Voice Vault", sLastTranscript);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    android.os.PersistableBundle extras = new android.os.PersistableBundle();
+                    extras.putBoolean("com.android.systemui.SUPPRESS_CLIPBOARD_OVERLAY", true);
+                    clip.getDescription().setExtras(extras);
+                }
                 cm.setPrimaryClip(clip);
+
+                // Auto-dismiss the SystemUI bottom-left overlay immediately if accessibility is active
+                VoiceVaultKeyService.autoDismissClipboardOverlay();
             }
 
             // Combined authoritative completion feedback: Double Buzz + Instant Chime + Pill Checkmark
