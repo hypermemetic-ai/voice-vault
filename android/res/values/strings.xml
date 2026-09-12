@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Voice Recorder</string>
+    <string name="app_name">Voice Vault</string>
     <string name="tile_name">Voice Dictate</string>
     <string name="tile_recording">Recording…</string>
-    <string name="channel_name">Voice Recorder Background Service</string>
+    <string name="channel_name">Voice Vault Background Service</string>
     <string name="channel_desc">Active background voice recording and transcription service</string>
     <string name="action_stop">Stop &amp; Transcribe</string>
     <string name="action_cancel">Discard</string>
     <string name="copied_toast">Transcribed &amp; copied to clipboard!</string>
-    <string name="quick_tap_name">Voice Recorder (Quick Toggle)</string>
-    <string name="transcripts_title">Voice Recorder</string>
+    <string name="quick_tap_name">Voice Vault (Quick Toggle)</string>
+    <string name="transcripts_title">Voice Vault</string>
     <string name="accessibility_desc">Double-press Volume Down key on phone side to start and stop dictation</string>
-    <string name="floating_overlay_channel">Voice Recorder Floating Button</string>
+    <string name="floating_overlay_channel">Voice Vault Floating Button</string>
 </resources>

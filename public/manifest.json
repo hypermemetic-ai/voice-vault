@@ -1,6 +1,6 @@
 {
-  "name": "Voice Recorder",
-  "short_name": "Recorder",
+  "name": "Voice Vault",
+  "short_name": "Voice Vault",
   "description": "Local-first asynchronous dictation powered by RTX A2000 Whisper Large v3 Turbo",
   "start_url": "/",
   "display": "standalone",

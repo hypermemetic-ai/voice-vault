@@ -1,4 +1,4 @@
-# Voice Recorder (Voice Vault)
+# Voice Vault
 
 Ultra-reliable, local-first asynchronous voice recorder and dictation tool for Android (Google Pixel 10) and Web, transcribing through Whisper Large v3 Turbo on local GPU and automatically copying text straight to the clipboard.
 
@@ -78,7 +78,7 @@ The signed release APK will be generated at `android/build/VoiceVault.apk` and c
 2. Grant Microphone and Notification permissions.
 3. Open **Settings > System > Gestures > Quick Tap to start actions**.
 4. Turn Quick Tap **ON**.
-5. Select **Open app** and choose **Voice Recorder** (or **Voice Recorder (Quick Toggle)**).
+5. Select **Open app** and choose **Voice Vault** (or **Voice Vault (Quick Toggle)**).
 6. Double-tap the back of your phone to start recording; double-tap again to transcribe and copy to clipboard.
 
 ---

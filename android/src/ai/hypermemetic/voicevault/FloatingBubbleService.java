@@ -106,7 +106,7 @@ public class FloatingBubbleService extends Service {
             mBubbleView.setBackgroundResource(R.drawable.bg_btn_red);
             mBubbleView.setImageResource(R.drawable.ic_btn_stop_symbol);
         } else {
-            mBubbleView.setBackgroundResource(R.drawable.bg_btn_green);
+            mBubbleView.setBackgroundResource(R.drawable.bg_btn_idle);
             mBubbleView.setImageResource(R.drawable.ic_btn_record_symbol);
         }
     }
