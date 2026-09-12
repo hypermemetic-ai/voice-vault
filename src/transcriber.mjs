@@ -1,9 +1,13 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { prepareAudioForTranscription } from "/home/qqp/projects/qq-dictation/src/recognizer.mjs";
+import { decodeWav, encodePcm16Wav } from "./wav.mjs";
+import { gateAudio, summarizeGate } from "./gate.mjs";
+import { createSpeakerEmbedder } from "./speaker.mjs";
+import { loadVoiceProfile, profileCompatibility } from "./profile.mjs";
 
 const SOCKET_PATH = process.env.WHISPER_SOCKET || "/tmp/orca_whisper.sock";
 const HANDY_BIN = process.env.HANDY_BIN || "/home/qqp/.local/bin/handy";
@@ -149,12 +153,48 @@ function queryHandyDirect(wavPath) {
 }
 
 /**
- * Full end-to-end transcription of an audio file path.
+ * Default Whisper backend: warm daemon over the unix socket, handy as fallback.
  */
-export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now()}`) {
+async function defaultTranscribe(wavPath, reqId) {
+  try {
+    const resp = await queryWhisperSocket(wavPath, reqId);
+    return {
+      text: typeof resp?.text === "string" ? resp.text : "",
+      transcribe_ms: resp?.transcribe_ms,
+      backend: "daemon_gpu",
+    };
+  } catch {
+    const resp = await queryHandyDirect(wavPath);
+    return {
+      text: typeof resp?.text === "string" ? resp.text : "",
+      transcribe_ms: resp?.transcribe_ms,
+      backend: "handy_direct_gpu",
+    };
+  }
+}
+
+/**
+ * Full end-to-end transcription of an audio file path.
+ *
+ * When a voiceprint is enrolled, each VAD speech segment is verified against
+ * the enrolled gallery and only the segments that match the user are sent to
+ * Whisper. With no profile (or an incompatible/unavailable embedder) the
+ * pipeline behaves exactly as before - a graceful, regression-free fallback.
+ *
+ * @param {string} rawAudioPath
+ * @param {string} reqId
+ * @param {object} [options]
+ * @param {(wavPath: string, reqId: string) => Promise<{text: string, transcribe_ms?: number, backend?: string}>} [options.transcribe]
+ * @param {boolean} [options.speakerGate] force the gate on/off
+ * @param {object|null} [options.profile] explicit profile (bypasses the database)
+ * @param {object} [options.embedder] explicit embedder instance
+ */
+export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now()}`, options = {}) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "voice-vault-"));
   const rawWavPath = path.join(tmpDir, "converted.wav");
   const filteredWavPath = path.join(tmpDir, "filtered.wav");
+  const gateRequested =
+    options.speakerGate ?? process.env.VOICE_VAULT_SPEAKER_GATE !== "off";
 
   try {
     const startTime = Date.now();
@@ -173,23 +213,84 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
         hasSpeech: false,
         durationMs: 0,
         transcribeMs: Date.now() - startTime,
-        backend: "vad_silence_filter"
+        backend: "vad_silence_filter",
+        gate: { enabled: false, reason: "no_speech" }
       };
     }
 
-    // Write the VAD-trimmed audio
-    fs.writeFileSync(filteredWavPath, prepared.wavBytes);
+    const inputDurationMs = Math.round((prepared.wavBytes.length - 44) / 32);
 
-    // 3. Transcribe via warm Whisper Daemon on RTX A2000
-    let resp;
-    let backend = "daemon_gpu";
-    try {
-      resp = await queryWhisperSocket(filteredWavPath, reqId);
-    } catch (daemonErr) {
-      // Fallback to handy process
-      resp = await queryHandyDirect(filteredWavPath);
-      backend = "handy_direct_gpu";
+    // 3. Anti-Hallucination Layer 2: target-speaker voiceprint gate
+    let audioToTranscribe = prepared.wavBytes;
+    let gate = { enabled: false, reason: gateRequested ? "not_enrolled" : "disabled" };
+
+    if (gateRequested) {
+      const profile = Object.prototype.hasOwnProperty.call(options, "profile")
+        ? options.profile
+        : loadVoiceProfile();
+
+      if (profile && profile.enrolled) {
+        let embedder = options.embedder || null;
+        try {
+          if (!embedder) embedder = await createSpeakerEmbedder(options.embedderOptions || {});
+        } catch (error) {
+          embedder = null;
+          gate = { enabled: false, reason: `embedder_unavailable:${error.message}` };
+        }
+
+        const compatibility = profileCompatibility(profile, embedder);
+        if (embedder && !compatibility.compatible) {
+          gate = { enabled: false, reason: compatibility.reason };
+        } else if (embedder) {
+          const decoded = decodeWav(prepared.wavBytes);
+          if (!decoded) {
+            gate = { enabled: false, reason: "undecodable_audio" };
+          } else {
+            const result = await gateAudio({
+              pcm: decoded.samples,
+              sampleRate: decoded.sampleRate,
+              profile,
+              embedder,
+              vad: options.gate?.vad || {},
+              decision: options.gate?.decision || {},
+            });
+            gate = {
+              ...result,
+              profile: {
+                modelId: profile.modelId,
+                backend: profile.backend,
+                dim: profile.dim,
+                sampleCount: profile.sampleCount,
+                threshold: profile.threshold,
+                mu: profile.mu,
+                sigma: profile.sigma,
+              },
+            };
+
+            if (result.kept === 0) {
+              return {
+                ok: true,
+                text: "",
+                hasSpeech: false,
+                rejected: true,
+                durationMs: inputDurationMs,
+                transcribeMs: Date.now() - startTime,
+                backend: "speaker_gate_rejected",
+                gate: summarizeGate(gate),
+              };
+            }
+
+            audioToTranscribe = encodePcm16Wav(result.acceptedPcm, decoded.sampleRate);
+          }
+        }
+      }
     }
+
+    fs.writeFileSync(filteredWavPath, audioToTranscribe);
+
+    // 4. Transcribe via warm Whisper Daemon on RTX A2000
+    const transcribe = options.transcribe || defaultTranscribe;
+    const resp = await transcribe(filteredWavPath, reqId);
 
     const rawText = (resp && typeof resp.text === "string") ? resp.text : "";
     const cleanText = cleanTranscript(rawText);
@@ -198,8 +299,12 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
       ok: true,
       text: cleanText,
       hasSpeech: cleanText.length > 0,
-      transcribeMs: resp.transcribe_ms || (Date.now() - startTime),
-      backend
+      rejected: false,
+      durationMs: inputDurationMs,
+      audioSentMs: Math.round((audioToTranscribe.length - 44) / 32),
+      transcribeMs: resp?.transcribe_ms || (Date.now() - startTime),
+      backend: resp?.backend || "daemon_gpu",
+      gate: summarizeGate(gate),
     };
   } finally {
     try {

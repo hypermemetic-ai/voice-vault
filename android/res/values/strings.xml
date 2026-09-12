@@ -10,6 +10,7 @@
     <string name="copied_toast">Transcribed &amp; copied to clipboard!</string>
     <string name="quick_tap_name">Voice Vault (Quick Toggle)</string>
     <string name="transcripts_title">Voice Vault</string>
+    <string name="enroll_title">Enroll Voice</string>
     <string name="accessibility_desc">Double-press Volume Down key on phone side to start and stop dictation</string>
     <string name="floating_overlay_channel">Voice Vault Floating Button</string>
 </resources>

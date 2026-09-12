@@ -242,7 +242,13 @@ public class VoiceVaultService extends Service {
             mCurrentAudioFile = new File(dir, "dictation_" + System.currentTimeMillis() + ".m4a");
 
             mRecorder = new MediaRecorder();
-            mRecorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+            // VOICE_RECOGNITION activates the Pixel's multi-microphone
+            // beamforming / target-voice capture path, which steers a beam at
+            // the talker in front of the device instead of picking up the whole
+            // room the way AudioSource.MIC does. This is the client-side half of
+            // the two-part speaker-rejection pipeline (server voiceprint gate is
+            // the other half).
+            mRecorder.setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION);
             mRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
             mRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
             mRecorder.setAudioEncodingBitRate(96000);

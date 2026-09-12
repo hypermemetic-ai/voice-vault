@@ -30,11 +30,15 @@ import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import org.json.JSONObject;
+
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int PERMISSION_REQ_CODE = 100;
@@ -51,7 +55,9 @@ public class MainActivity extends Activity {
     private Button mBtnCopy;
     private Button mBtnExpand;
     private Button mBtnToggleOverlay;
+    private Button mBtnVoiceProfile;
     private boolean mTranscriptExpanded = false;
+    private final ExecutorService mProfileExecutor = Executors.newSingleThreadExecutor();
 
     // Slide-Out Drawer Views
     private View mBtnOpenHistory;
@@ -144,6 +150,9 @@ public class MainActivity extends Activity {
         mBtnCopy = findViewById(R.id.btn_copy);
         mBtnExpand = findViewById(R.id.btn_expand);
         mBtnToggleOverlay = findViewById(R.id.btn_toggle_overlay);
+        mBtnVoiceProfile = findViewById(R.id.btn_voice_profile);
+        mBtnVoiceProfile.setOnClickListener(v ->
+                startActivity(new Intent(MainActivity.this, VoiceEnrollActivity.class)));
 
         // Drawer views
         mBtnOpenHistory = findViewById(R.id.btn_open_history);
@@ -651,6 +660,33 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         syncWithServiceState();
+        refreshVoiceProfileStatus();
+    }
+
+    /**
+     * Show the live enrollment state of the server voiceprint gate on the
+     * dashboard ("Voice Gate: ON · 3 clips" / "OFF · Tap to enroll").
+     */
+    private void refreshVoiceProfileStatus() {
+        if (mBtnVoiceProfile == null) return;
+        mProfileExecutor.execute(() -> {
+            String label;
+            try {
+                JSONObject status = VoiceVaultApi.request(VoiceVaultApi.PROFILE_STATUS_URL, "GET");
+                if (status.optBoolean("enrolled", false)) {
+                    label = String.format(Locale.US, "🎙 Voice Gate: ON · %d clips · θ %.2f",
+                            status.optInt("sampleCount", 0), status.optDouble("threshold", 0));
+                } else {
+                    label = "🎙 Voice Gate: OFF · Tap to enroll";
+                }
+            } catch (Exception e) {
+                label = "🎙 Voice Gate: unavailable";
+            }
+            final String text = label;
+            mHandler.post(() -> {
+                if (mBtnVoiceProfile != null) mBtnVoiceProfile.setText(text);
+            });
+        });
     }
 
     @Override
@@ -666,6 +702,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        mProfileExecutor.shutdownNow();
         stopTimerUpdater();
         if (mReceiver != null) {
             try { unregisterReceiver(mReceiver); } catch (Exception ignored) {}

@@ -428,3 +428,243 @@ body {
   word-break: break-word;
 }
 
+
+/* ---------------------------------------------------------------------------
+   Voice profile chip + enrollment modal
+   --------------------------------------------------------------------------- */
+
+.top-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.voice-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  background: #0d0d0d;
+  border: 1px solid #1f1f1f;
+  border-radius: 999px;
+  color: #9a9a9a;
+  font-family: inherit;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+}
+
+.voice-chip.enrolled {
+  color: #22c55e;
+  border-color: #14361f;
+}
+
+.voice-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #444444;
+}
+
+.voice-chip.enrolled .voice-chip-dot {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.7);
+}
+
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  z-index: 40;
+}
+
+.modal {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+  background: #080808;
+  border: 1px solid #1c1c1c;
+  border-radius: 14px;
+  padding: 20px;
+  z-index: 41;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.75);
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.modal-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #ffffff;
+}
+
+.modal-subtitle {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: #5f5f5f;
+}
+
+.modal-copy {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #8a8a8a;
+  margin-bottom: 16px;
+}
+
+.enroll-slots {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.enroll-slot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid #191919;
+  border-radius: 10px;
+  background: #0c0c0c;
+  font-size: 0.72rem;
+  color: #6f6f6f;
+}
+
+.enroll-slot.captured {
+  border-color: #14361f;
+  color: #22c55e;
+}
+
+.enroll-slot.recording {
+  border-color: #7f1d1d;
+  color: #ef4444;
+}
+
+.enroll-slot-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #333333;
+  flex: 0 0 auto;
+}
+
+.enroll-slot.captured .enroll-slot-dot { background: #22c55e; }
+.enroll-slot.recording .enroll-slot-dot { background: #ef4444; animation: pulse 0.9s ease-in-out infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.enroll-meter {
+  height: 4px;
+  border-radius: 999px;
+  background: #161616;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.enroll-level {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #22c55e, #ef4444);
+  transition: width 80ms linear;
+}
+
+.enroll-timer {
+  text-align: center;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #ffffff;
+  margin-bottom: 14px;
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.btn-primary,
+.btn-secondary,
+.btn-danger {
+  flex: 1 1 auto;
+  min-height: 40px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #262626;
+  background: #131313;
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #ffffff;
+}
+
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-danger:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  color: #ef4444;
+  border-color: #3a1414;
+  background: #120808;
+}
+
+.enroll-status {
+  font-size: 0.72rem;
+  color: #7a7a7a;
+  line-height: 1.5;
+}
+
+.enroll-result {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #0c0c0c;
+  border: 1px solid #1b1b1b;
+  font-size: 0.72rem;
+  line-height: 1.6;
+  color: #9a9a9a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.enroll-result.good { border-color: #14361f; color: #22c55e; }
+.enroll-result.bad { border-color: #3a1414; color: #ef4444; }
+
+.gate-summary {
+  font-size: 0.68rem;
+  color: #6f6f6f;
+  letter-spacing: 0.04em;
+  margin: 6px 0 8px;
+}
+
+.result-badge.rejected {
+  color: #ef4444;
+}
