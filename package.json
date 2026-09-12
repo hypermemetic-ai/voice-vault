@@ -1,0 +1,10 @@
+{
+  "name": "voice-vault",
+  "version": "1.0.0",
+  "description": "Ultra-reliable, local-first asynchronous voice recorder & dictation tool with Whisper Large v3 Turbo on GPU",
+  "main": "src/server.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs"
+  }
+}

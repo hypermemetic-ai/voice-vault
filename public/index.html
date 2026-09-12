@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <title>Voice Recorder</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Top Bar with History Toggle, GPU Indicator & Processing Spinner -->
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <button id="openHistoryBtn" class="history-toggle-btn" aria-label="Open History">☰</button>
+        <span class="app-title">VOICE RECORDER</span>
+      </div>
+      <div class="gpu-container">
+        <span id="gpuSpinner" class="gpu-spinner" hidden></span>
+        <span id="gpuDot" class="gpu-dot"></span>
+        <span id="gpuText" class="gpu-text">RTX A2000</span>
+      </div>
+    </header>
+
+    <!-- Main Controller: Timer & Big Symbol Button -->
+    <main class="main-control">
+      <div class="timer" id="timer">00:00</div>
+      
+      <button id="mainBtn" class="btn-green" aria-label="Toggle Recording">
+        <svg class="btn-svg" viewBox="0 0 100 100">
+          <circle id="recordSymbol" cx="50" cy="50" r="34" fill="#ffffff" />
+          <rect id="stopSymbol" x="20" y="20" width="60" height="60" rx="0" fill="#ffffff" style="display: none;" />
+        </svg>
+      </button>
+    </main>
+
+    <!-- Transcript Box & Playback -->
+    <section id="resultSection" class="result-section" hidden>
+      <div class="result-header">
+        <span id="resultBadge" class="result-badge">COPIED TO CLIPBOARD</span>
+        <button id="manualCopyBtn" class="btn-text-action">COPY</button>
+      </div>
+      <textarea id="transcriptText" class="transcript-box" readonly rows="4"></textarea>
+      <audio id="audioPlayback" controls class="audio-control"></audio>
+    </section>
+
+    <!-- Bottom: Subtle link for background native APK -->
+    <footer class="bottom-bar">
+      <a href="/voice-vault.apk" class="apk-link" download="VoiceVault.apk">
+        Android Background APK
+      </a>
+    </footer>
+  </div>
+
+  <!-- Slide-Out History Drawer -->
+  <div id="drawerScrim" class="drawer-scrim" hidden></div>
+  <aside id="historyDrawer" class="history-drawer" aria-label="Transcription History">
+    <div class="drawer-header">
+      <div>
+        <h2 class="drawer-title">TRANSCRIPTS</h2>
+        <span class="drawer-subtitle">Last 50 Transcripts · Tap to copy</span>
+      </div>
+      <button id="closeHistoryBtn" class="drawer-close-btn" aria-label="Close">✕</button>
+    </div>
+    <div id="historyList" class="history-list"></div>
+  </aside>
+
+  <script src="/app.js"></script>
+</body>
+</html>

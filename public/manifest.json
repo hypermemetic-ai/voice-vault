@@ -1,0 +1,18 @@
+{
+  "name": "Voice Recorder",
+  "short_name": "Recorder",
+  "description": "Local-first asynchronous dictation powered by RTX A2000 Whisper Large v3 Turbo",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090a0f",
+  "theme_color": "#090a0f",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
