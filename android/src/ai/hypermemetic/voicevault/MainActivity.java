@@ -67,11 +67,19 @@ public class MainActivity extends Activity {
         boolean explicitQuickToggle = intent.getBooleanExtra("quick_toggle", false);
         boolean fromSystemUi = ref.contains("systemui");
         boolean hasSourceBounds = intent.getSourceBounds() != null;
-        boolean fromLauncher = (flags & Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED) != 0
-                || ref.contains("launcher")
-                || hasSourceBounds;
 
-        boolean isQuickToggle = explicitQuickToggle || fromSystemUi || (!fromLauncher && !fromNotification);
+        // A real launcher launch carries the icon's source bounds or a launcher referrer.
+        // FLAG_ACTIVITY_RESET_TASK_IF_NEEDED must NOT be treated as a launcher signal:
+        // PackageManager.getLaunchIntentForPackage() always sets it, so Pixel Quick Tap
+        // (Columbus) headless launches were being misclassified as user launcher taps.
+        boolean fromLauncher = hasSourceBounds || ref.contains("launcher");
+        boolean fromHistory = (flags & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0;
+
+        // Anything launched in the background without source bounds, a launcher referrer,
+        // recents history or a notification is a Quick Tap / hardware trigger: toggle the
+        // recording service headlessly instead of opening the dashboard window.
+        boolean isQuickToggle = explicitQuickToggle || fromSystemUi
+                || (!fromLauncher && !fromHistory && !fromNotification);
 
         if (isQuickToggle) {
             if (Build.VERSION.SDK_INT >= 34) {
@@ -488,7 +496,7 @@ public class MainActivity extends Activity {
     }
 
     private void renderIdleState() {
-        mBtnRecord.setBackgroundResource(R.drawable.bg_btn_green);
+        mBtnRecord.setBackgroundResource(R.drawable.bg_btn_idle);
         mBtnRecord.setImageResource(R.drawable.ic_btn_record_symbol);
 
         stopTimerUpdater();

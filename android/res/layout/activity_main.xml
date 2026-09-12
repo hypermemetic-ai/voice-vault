@@ -33,7 +33,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="VOICE RECORDER"
+                android:text="VOICE VAULT"
                 android:textColor="#777777"
                 android:textSize="14sp"
                 android:textStyle="bold"
@@ -83,7 +83,7 @@
                 android:id="@+id/btn_record"
                 android:layout_width="210dp"
                 android:layout_height="210dp"
-                android:background="@drawable/bg_btn_green"
+                android:background="@drawable/bg_btn_idle"
                 android:src="@drawable/ic_btn_record_symbol"
                 android:scaleType="centerInside"
                 android:contentDescription="Record or Stop" />

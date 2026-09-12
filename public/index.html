@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#000000">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <title>Voice Recorder</title>
+  <title>Voice Vault</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" type="image/svg+xml" href="/icon.svg">
   <link rel="stylesheet" href="/style.css">
@@ -17,7 +17,7 @@
     <header class="top-bar">
       <div class="top-bar-left">
         <button id="openHistoryBtn" class="history-toggle-btn" aria-label="Open History">☰</button>
-        <span class="app-title">VOICE RECORDER</span>
+        <span class="app-title">VOICE VAULT</span>
       </div>
       <div class="gpu-container">
         <span id="gpuSpinner" class="gpu-spinner" hidden></span>
@@ -30,9 +30,9 @@
     <main class="main-control">
       <div class="timer" id="timer">00:00</div>
       
-      <button id="mainBtn" class="btn-green" aria-label="Toggle Recording">
+      <button id="mainBtn" class="btn-idle" aria-label="Toggle Recording">
         <svg class="btn-svg" viewBox="0 0 100 100">
-          <circle id="recordSymbol" cx="50" cy="50" r="34" fill="#ffffff" />
+          <circle id="recordSymbol" cx="50" cy="50" r="34" fill="#ef4444" />
           <rect id="stopSymbol" x="20" y="20" width="60" height="60" rx="0" fill="#ffffff" style="display: none;" />
         </svg>
       </button>

@@ -30,8 +30,8 @@
       stopSymbol.style.display = "block";
       mainBtn.disabled = false;
     } else {
-      // Solid Green Record Button with Large Circle
-      mainBtn.className = "btn-green";
+      // Subtle Dark Idle Button with Red Recording Circle
+      mainBtn.className = "btn-idle";
       recordSymbol.style.display = "block";
       stopSymbol.style.display = "none";
       mainBtn.disabled = isProcessing;
@@ -205,7 +205,7 @@
   }
 
   // Consistent 1-2 button toggle:
-  // Not recording -> Green button starts recording
+  // Not recording -> Idle button starts recording
   // Recording -> Red button stops recording
   mainBtn.addEventListener("click", () => {
     if (!isRecording) {

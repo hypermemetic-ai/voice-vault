@@ -138,14 +138,14 @@ body {
   display: block;
 }
 
-/* State: Green Record Button */
-#mainBtn.btn-green {
-  background-color: #15803d;
-  border-color: #22c55e;
+/* State: Idle Record Button — subtle semi-transparent dark gray with red recording circle */
+#mainBtn.btn-idle {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
-#mainBtn.btn-green:active {
-  background-color: #166534;
+#mainBtn.btn-idle:active {
+  background-color: rgba(255, 255, 255, 0.14);
 }
 
 /* State: Red Stop Button */
