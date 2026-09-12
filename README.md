@@ -72,6 +72,15 @@ cd android
 
 The signed release APK will be generated at `android/build/VoiceVault.apk` and copied to `public/voice-vault.apk`.
 
+> **Release keystore**: `android/release.keystore` is **tracked in git on purpose**
+> (alias `voicevault`, store/key password `voicevault`). Android rejects in-place
+> updates signed with a different certificate
+> (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`), so never regenerate or replace it.
+> Expected signing certificate SHA-256:
+> `24:AF:79:AF:96:7D:37:80:6A:AC:2B:8D:82:2B:43:81:56:37:64:F0:76:D9:B3:7C:1E:EF:F6:F1:D8:14:1D:F0`.
+> Verify a build with
+> `apksigner verify --print-certs public/voice-vault.apk`.
+
 ### 3. Pixel Quick Tap Setup
 
 1. Install `VoiceVault.apk` on your Google Pixel phone.

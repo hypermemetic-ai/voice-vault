@@ -42,9 +42,12 @@
     <section id="resultSection" class="result-section" hidden>
       <div class="result-header">
         <span id="resultBadge" class="result-badge">COPIED TO CLIPBOARD</span>
-        <button id="manualCopyBtn" class="btn-text-action">COPY</button>
+        <div class="result-actions">
+          <button id="expandTranscriptBtn" class="btn-text-action" aria-expanded="false" aria-controls="transcriptText">EXPAND</button>
+          <button id="manualCopyBtn" class="btn-text-action">COPY</button>
+        </div>
       </div>
-      <textarea id="transcriptText" class="transcript-box" readonly rows="4"></textarea>
+      <textarea id="transcriptText" class="transcript-box" readonly rows="3"></textarea>
       <audio id="audioPlayback" controls class="audio-control"></audio>
     </section>
 

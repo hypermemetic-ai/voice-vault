@@ -5,8 +5,12 @@ yarn-debug.log*
 
 # Android Build Outputs
 android/build/
-android/release.keystore
 *.idsig
+
+# NOTE: android/release.keystore is intentionally tracked in git.
+# Android refuses to update an installed app whose signing certificate
+# changed (INSTALL_FAILED_UPDATE_INCOMPATIBLE), so the release keystore
+# must travel with the repository. Do not re-add it here or regenerate it.
 
 # OS & Temp
 .DS_Store

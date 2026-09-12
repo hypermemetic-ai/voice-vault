@@ -174,6 +174,13 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
+}
+
+.result-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .result-badge {
@@ -211,6 +218,28 @@ body {
   line-height: 1.5;
   resize: none;
   outline: none;
+  /* Compact preview: exactly 3 lines (1.5em line box each) + padding/border.
+     A long transcript can never push the 210px record button off-screen. */
+  max-height: calc(1.5em * 3 + 26px);
+  overflow-y: hidden;
+  transition: height 0.18s ease, max-height 0.18s ease;
+}
+
+/* A textarea's height comes from its rows attribute, so max-height alone
+   never grows it: the explicit height is what actually reveals more lines. */
+.transcript-box.expanded {
+  height: min(45vh, 340px);
+  max-height: min(45vh, 340px);
+  overflow-y: auto;
+}
+
+.transcript-box::-webkit-scrollbar {
+  width: 4px;
+}
+
+.transcript-box::-webkit-scrollbar-thumb {
+  background: #222222;
+  border-radius: 2px;
 }
 
 .audio-control {

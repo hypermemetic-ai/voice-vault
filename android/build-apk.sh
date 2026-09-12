@@ -85,16 +85,11 @@ KEYSTORE_PASS="voicevault"
 KEY_ALIAS="voicevault"
 
 if [[ ! -f "$KEYSTORE" ]]; then
-    echo "==> Generating release keystore..."
-    keytool -genkeypair -v \
-        -keystore "$KEYSTORE" \
-        -alias "$KEY_ALIAS" \
-        -keyalg RSA \
-        -keysize 2048 \
-        -validity 10000 \
-        -storepass "$KEYSTORE_PASS" \
-        -keypass "$KEYSTORE_PASS" \
-        -dname "CN=VoiceVault, OU=VoiceVault, O=Hypermemetic, L=Austin, ST=Texas, C=US"
+    # Never auto-generate: a different certificate makes Android refuse to
+    # update an installed app (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+    echo "Error: release keystore not found at $KEYSTORE" >&2
+    echo "It is tracked in git - restore it with: git checkout -- android/release.keystore" >&2
+    exit 1
 fi
 
 FINAL_APK="$BUILD_DIR/VoiceVault.apk"
