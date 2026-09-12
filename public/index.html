@@ -19,10 +19,16 @@
         <button id="openHistoryBtn" class="history-toggle-btn" aria-label="Open History">☰</button>
         <span class="app-title">VOICE VAULT</span>
       </div>
-      <div class="gpu-container">
-        <span id="gpuSpinner" class="gpu-spinner" hidden></span>
-        <span id="gpuDot" class="gpu-dot"></span>
-        <span id="gpuText" class="gpu-text">RTX A2000</span>
+      <div class="top-bar-right">
+        <button id="voiceProfileBtn" class="voice-chip" aria-haspopup="dialog" aria-controls="enrollModal" title="Voice profile">
+          <span id="voiceChipDot" class="voice-chip-dot"></span>
+          <span id="voiceChipText" class="voice-chip-text">VOICE</span>
+        </button>
+        <div class="gpu-container">
+          <span id="gpuSpinner" class="gpu-spinner" hidden></span>
+          <span id="gpuDot" class="gpu-dot"></span>
+          <span id="gpuText" class="gpu-text">RTX A2000</span>
+        </div>
       </div>
     </header>
 
@@ -47,6 +53,7 @@
           <button id="manualCopyBtn" class="btn-text-action">COPY</button>
         </div>
       </div>
+      <p id="gateSummary" class="gate-summary" hidden></p>
       <textarea id="transcriptText" class="transcript-box" readonly rows="3"></textarea>
       <audio id="audioPlayback" controls class="audio-control"></audio>
     </section>
@@ -71,6 +78,39 @@
     </div>
     <div id="historyList" class="history-list"></div>
   </aside>
+
+  <!-- Voice Enrollment Modal -->
+  <div id="enrollScrim" class="modal-scrim" hidden></div>
+  <section id="enrollModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="enrollTitle" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="enrollTitle" class="modal-title">ENROLL YOUR VOICE</h2>
+        <span class="modal-subtitle">Server-side voiceprint · only your words are transcribed</span>
+      </div>
+      <button id="closeEnrollBtn" class="drawer-close-btn" aria-label="Close">✕</button>
+    </div>
+
+    <p class="modal-copy">
+      Record three clips of about five seconds each, speaking normally. Voice Vault
+      learns your vocal signature and rejects other voices in the room before they
+      reach Whisper.
+    </p>
+
+    <div id="enrollSlots" class="enroll-slots"></div>
+
+    <div class="enroll-meter" aria-hidden="true"><div id="enrollLevel" class="enroll-level"></div></div>
+    <div id="enrollTimer" class="enroll-timer">00:00</div>
+
+    <div class="modal-actions">
+      <button id="enrollRecordBtn" class="btn-primary">● RECORD CLIP</button>
+      <button id="enrollSubmitBtn" class="btn-secondary" disabled>ENROLL VOICE</button>
+      <button id="enrollTestBtn" class="btn-secondary" disabled>TEST MY VOICE</button>
+      <button id="enrollResetBtn" class="btn-danger" hidden>REMOVE PROFILE</button>
+    </div>
+
+    <div id="enrollStatus" class="enroll-status">Checking voice profile…</div>
+    <div id="enrollResult" class="enroll-result" hidden></div>
+  </section>
 
   <script src="/app.js"></script>
 </body>

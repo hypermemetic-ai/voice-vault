@@ -7,6 +7,10 @@ yarn-debug.log*
 android/build/
 *.idsig
 
+# Speaker embedding models are downloaded, not committed (each is ~30 MB):
+#   npm run speaker:fetch-model
+models/*.onnx
+
 # NOTE: android/release.keystore is intentionally tracked in git.
 # Android refuses to update an installed app whose signing certificate
 # changed (INSTALL_FAILED_UPDATE_INCOMPATIBLE), so the release keystore
@@ -18,3 +22,7 @@ Thumbs.db
 *.tmp
 *.log
 .architect/
+
+# Python
+__pycache__/
+*.pyc
