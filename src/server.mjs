@@ -457,6 +457,7 @@ export function createAppServer(options = {}) {
           transcribeMs: transcribeResult.transcribeMs,
           audioUrl: `/api/audio/${id}`,
           backend: transcribeResult.backend,
+          backendAttempts: transcribeResult.backendAttempts,
           gate: transcribeResult.gate,
         });
         return;

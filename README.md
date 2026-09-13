@@ -16,6 +16,7 @@ Ultra-reliable, local-first asynchronous voice recorder and dictation tool for A
 - **Physical Side-Button Trigger**: Optional double-tap Volume Down shortcut via Android Accessibility Service.
 - **Floating Screen Edge Bubble**: Draggable on-screen toggle button for devices without rear-tap gestures.
 - **Whisper Large v3 Turbo Backend**: Local Node.js server with SQLite storage, VAD silence trimming, anti-hallucination sanitization, and streaming sliding-window support for arbitrarily long recordings.
+- **Four-Tier Backend Cascade**: Warm daemon → RTX A2000 → Radeon 780M iGPU → CPU. A wedged daemon is capped at 15 s and rejected on any non-200 or `{ ok: false }` reply, so a constrained GPU never leaves the client stuck on "Processing...".
 - **Web Dashboard & PWA**: Clean pitch-black web interface with URW Gothic typography, real-time timer, and direct APK download.
 
 ---
@@ -129,6 +130,26 @@ enrollment screen.
 
 ---
 
+## Whisper Backend Cascade
+
+Transcription walks a four-tier cascade and stops at the first backend that
+answers, so a wedged daemon or a GPU that cannot allocate VRAM never leaves the
+Android app or Web UI stuck on "Processing...":
+
+1. **Warm daemon** over `WHISPER_SOCKET` (RTX A2000), hard-capped at **15 s** per request.
+2. **Direct `handy`** on the RTX A2000 (`--device-index 1`).
+3. **Direct `handy`** on the Radeon 780M iGPU (`--device-index 0`).
+4. **Direct `handy`** on the CPU (`--device-index 2`).
+
+A daemon reply is accepted only when it is HTTP 200 with `ok !== false`. Any
+transport error, timeout, broken pipe, non-200 status, malformed JSON or
+explicit `{ ok: false }` payload rejects that tier immediately and falls through
+to the next one. `POST /api/transcribe` reports the winning `backend` plus the
+per-tier `backendAttempts` history, and a hung `handy` process is killed at
+`HANDY_TIMEOUT_MS` instead of blocking the request forever.
+
+---
+
 ## API
 
 | Method | Path | Description |
@@ -215,10 +236,16 @@ The signed release APK will be generated at `android/build/VoiceVault.apk` and c
 
 ```bash
 npm test                     # unit + integration suite (node:test)
+npm run test:e2e             # real backends: POST /api/transcribe latency (< 2 s)
 npm run verify               # full ticket verification, incl. APK cert + benchmarks
 npm run verify:build-apk     # same, plus a clean APK rebuild
 python3 python/validate_fbank.py --help
 ```
+
+`test/transcriber.test.mjs` covers the backend cascade hermetically (mock daemon
+socket and a stub `handy`): the 15 s cap, the non-200 / `{ ok: false }` rejection
+paths, the daemon → dGPU → iGPU → CPU order, and the all-backends-failed report.
+`npm run test:e2e` adds the real end-to-end check against the hardware.
 
 `npm run verify` covers the ticket's testing plan end to end: beamforming audio
 source, unchanged signing certificate, 192-d/512-d normalized embeddings,
@@ -252,6 +279,13 @@ host (AMD Ryzen 7 250 + RTX A2000, ONNX CPU provider, 3.8 s utterance):
 | `VOICE_VAULT_SPEAKER_AUTODOWNLOAD` | `on` | Set `off` to never download models |
 | `VOICE_VAULT_PYTHON` | auto-detected | Python interpreter for the sidecar |
 | `VOICE_VAULT_SPEAKER_THREADS` | `4` | onnxruntime intra-op threads |
+| `WHISPER_SOCKET` | `/tmp/orca_whisper.sock` | Warm Whisper daemon unix socket |
+| `WHISPER_SOCKET_TIMEOUT_MS` | `15000` | Daemon cap before falling back to `handy` |
+| `HANDY_BIN` | `/home/qqp/.local/bin/handy` | Executable used by the direct tiers |
+| `HANDY_DEVICE_INDEX_GPU` | `1` | `handy --list-devices` index of the RTX A2000 |
+| `HANDY_DEVICE_INDEX_IGPU` | `0` | Index of the Radeon 780M iGPU |
+| `HANDY_DEVICE_INDEX_CPU` | `2` | Index of the CPU backend |
+| `HANDY_TIMEOUT_MS` | `600000` | Cap before a hung `handy` process is killed |
 
 ---
 

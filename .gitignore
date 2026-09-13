@@ -21,7 +21,6 @@ models/*.onnx
 Thumbs.db
 *.tmp
 *.log
-.architect/
 
 # Python
 __pycache__/
