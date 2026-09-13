@@ -83,16 +83,21 @@ public class MainActivity extends Activity {
         boolean fromSystemUi = ref.contains("systemui");
         boolean hasSourceBounds = intent.getSourceBounds() != null;
 
-        // A real launcher launch carries the icon's source bounds or a launcher referrer.
-        // FLAG_ACTIVITY_RESET_TASK_IF_NEEDED must NOT be treated as a launcher signal:
-        // PackageManager.getLaunchIntentForPackage() always sets it, so Pixel Quick Tap
-        // (Columbus) headless launches were being misclassified as user launcher taps.
-        boolean fromLauncher = hasSourceBounds || ref.contains("launcher");
+        // A real home-screen icon tap always carries the tapped icon's source bounds.
+        // Pixel Quick Tap (Columbus) never sets them, so `hasSourceBounds` is the only
+        // dependable launcher signal. Do NOT fall back to a launcher-referrer check:
+        // com.google.android.apps.nexuslauncher is also the process Columbus dispatches
+        // Quick Tap from, so if Android re-binds Quick Tap to MainActivity, a referrer
+        // match would misclassify the gesture as a home screen icon click and open the
+        // dashboard instead of toggling headlessly.
+        // FLAG_ACTIVITY_RESET_TASK_IF_NEEDED is likewise not a launcher signal:
+        // PackageManager.getLaunchIntentForPackage() always sets it.
+        boolean fromLauncher = hasSourceBounds;
         boolean fromHistory = (flags & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0;
 
-        // Anything launched in the background without source bounds, a launcher referrer,
-        // recents history or a notification is a Quick Tap / hardware trigger: toggle the
-        // recording service headlessly instead of opening the dashboard window.
+        // Anything launched in the background without source bounds, recents history
+        // or a notification is a Quick Tap / hardware trigger: toggle the recording
+        // service headlessly instead of opening the dashboard window.
         boolean isQuickToggle = explicitQuickToggle || fromSystemUi
                 || (!fromLauncher && !fromHistory && !fromNotification);
 
@@ -214,6 +219,7 @@ public class MainActivity extends Activity {
         checkAndRequestPermissions();
         setupReceiver();
         syncWithServiceState();
+        populateLatestTranscriptIfNeeded();
     }
 
     /**
@@ -288,6 +294,47 @@ public class MainActivity extends Activity {
         // transcript and let the outer ScrollView absorb the overflow.
         int cap = room > 0 ? room : Math.round(96 * density);
         return Math.min(cap, Math.round(available * 0.45f));
+    }
+
+    /**
+     * Show the latest dictation when the dashboard opens with an empty editor.
+     *
+     * VoiceVaultService.getLastTranscript() is an in-memory static, so it is blank
+     * after a cold start or a service restart and the transcript preview would stay
+     * hidden even though HistoryManager still holds the user's latest dictation.
+     * Prefer the live value, then fall back to the most recent transcript persisted
+     * by HistoryManager (local cache, then one server sync). Recording sessions own
+     * the editor, so a live capture is never clobbered.
+     */
+    private void populateLatestTranscriptIfNeeded() {
+        if (mEtTranscript == null || mLayoutTranscript == null) return;
+        if (VoiceVaultService.isRecording()) return;
+        if (!mEtTranscript.getText().toString().trim().isEmpty()) return;
+
+        String last = VoiceVaultService.getLastTranscript();
+        if (last != null && !last.trim().isEmpty()) {
+            showTranscriptPreview(last.trim());
+            return;
+        }
+
+        HistoryManager.fetchLatestTranscript(this, entry -> {
+            if (entry == null || entry.transcript == null || entry.transcript.trim().isEmpty()) return;
+            final String text = entry.transcript.trim();
+            mHandler.post(() -> {
+                if (mEtTranscript == null || mLayoutTranscript == null) return;
+                if (VoiceVaultService.isRecording()) return;
+                if (!mEtTranscript.getText().toString().trim().isEmpty()) return;
+                showTranscriptPreview(text);
+            });
+        });
+    }
+
+    /** Reveal the compact 3-line transcript preview with the given text. */
+    private void showTranscriptPreview(String text) {
+        if (mEtTranscript == null || mLayoutTranscript == null) return;
+        mLayoutTranscript.setVisibility(View.VISIBLE);
+        mEtTranscript.setText(text);
+        setTranscriptExpanded(false);
     }
 
     private void openDrawer() {

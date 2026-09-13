@@ -49,6 +49,10 @@ public class HistoryManager {
         void onLoaded(Map<String, List<Entry>> grouped);
     }
 
+    public interface LatestTranscriptCallback {
+        void onLoaded(Entry latest);
+    }
+
     public static synchronized void saveLocalTranscript(Context context, String text, long durationMs) {
         if (text == null || text.trim().isEmpty()) return;
         List<Entry> entries = loadLocalCache(context);
@@ -124,61 +128,98 @@ public class HistoryManager {
             callback.onLoaded(grouped);
 
             // Then fetch latest 50 from server to sync
-            try {
-                URL url = new URL("https://qq-box.tail580136.ts.net:3443/api/history?limit=50");
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(6000);
-                conn.setReadTimeout(6000);
-
-                if (conn.getResponseCode() == 200) {
-                    InputStream is = conn.getInputStream();
-                    BufferedReader reader = new BufferedReader(new InputStreamReader(is, "UTF-8"));
-                    StringBuilder sb = new StringBuilder();
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        sb.append(line);
-                    }
-                    JSONObject root = new JSONObject(sb.toString());
-                    JSONArray recs = root.optJSONArray("recordings");
-                    if (recs != null) {
-                        List<Entry> remoteEntries = new ArrayList<>();
-                        SimpleDateFormat isoFmt = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);
-                        isoFmt.setTimeZone(TimeZone.getTimeZone("UTC"));
-
-                        for (int i = 0; i < recs.length(); i++) {
-                            JSONObject item = recs.getJSONObject(i);
-                            String text = item.optString("transcript", "").trim();
-                            if (text.isEmpty()) continue; // Transcripts only
-
-                            String createdAt = item.optString("created_at", "");
-                            long ts = System.currentTimeMillis();
-                            try {
-                                if (createdAt.length() >= 19) {
-                                    Date d = isoFmt.parse(createdAt.substring(0, 19));
-                                    if (d != null) ts = d.getTime();
-                                }
-                            } catch (Exception ignored) {}
-
-                            remoteEntries.add(new Entry(
-                                    item.optString("id", ""),
-                                    ts,
-                                    item.optLong("duration_ms", 0),
-                                    text
-                            ));
-                            if (remoteEntries.size() >= MAX_TRANSCRIPTS) break;
-                        }
-
-                        if (!remoteEntries.isEmpty()) {
-                            writeLocalCache(context, remoteEntries);
-                            callback.onLoaded(groupEntries(remoteEntries));
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                Log.d(TAG, "Network history fetch skipped: " + e.getMessage());
+            List<Entry> remote = fetchRemoteEntries();
+            if (!remote.isEmpty()) {
+                writeLocalCache(context, remote);
+                callback.onLoaded(groupEntries(remote));
             }
         }).start();
+    }
+
+    /**
+     * Resolve the single most recent transcript for the dashboard preview: the
+     * local cache first (instant, no network), then one server sync when nothing
+     * is cached yet (fresh install or cleared app data). Runs off the main thread
+     * and invokes the callback exactly once with null when there is no history.
+     */
+    public static void fetchLatestTranscript(Context context, LatestTranscriptCallback callback) {
+        new Thread(() -> {
+            Entry latest = latestEntry(loadLocalCache(context));
+            if (latest == null) {
+                List<Entry> remote = fetchRemoteEntries();
+                if (!remote.isEmpty()) {
+                    writeLocalCache(context, remote);
+                }
+                latest = latestEntry(remote);
+            }
+            if (callback != null) callback.onLoaded(latest);
+        }).start();
+    }
+
+    /** Newest non-blank entry (by timestamp), or null when the list has none. */
+    public static Entry latestEntry(List<Entry> entries) {
+        Entry latest = null;
+        if (entries == null) return null;
+        for (Entry entry : entries) {
+            if (entry == null || entry.transcript == null || entry.transcript.trim().isEmpty()) continue;
+            if (latest == null || entry.timestamp > latest.timestamp) {
+                latest = entry;
+            }
+        }
+        return latest;
+    }
+
+    private static List<Entry> fetchRemoteEntries() {
+        List<Entry> remoteEntries = new ArrayList<>();
+        try {
+            URL url = new URL("https://qq-box.tail580136.ts.net:3443/api/history?limit=50");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(6000);
+            conn.setReadTimeout(6000);
+
+            if (conn.getResponseCode() == 200) {
+                InputStream is = conn.getInputStream();
+                BufferedReader reader = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line);
+                }
+                JSONObject root = new JSONObject(sb.toString());
+                JSONArray recs = root.optJSONArray("recordings");
+                if (recs != null) {
+                    SimpleDateFormat isoFmt = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);
+                    isoFmt.setTimeZone(TimeZone.getTimeZone("UTC"));
+
+                    for (int i = 0; i < recs.length(); i++) {
+                        JSONObject item = recs.getJSONObject(i);
+                        String text = item.optString("transcript", "").trim();
+                        if (text.isEmpty()) continue; // Transcripts only
+
+                        String createdAt = item.optString("created_at", "");
+                        long ts = System.currentTimeMillis();
+                        try {
+                            if (createdAt.length() >= 19) {
+                                Date d = isoFmt.parse(createdAt.substring(0, 19));
+                                if (d != null) ts = d.getTime();
+                            }
+                        } catch (Exception ignored) {}
+
+                        remoteEntries.add(new Entry(
+                                item.optString("id", ""),
+                                ts,
+                                item.optLong("duration_ms", 0),
+                                text
+                        ));
+                        if (remoteEntries.size() >= MAX_TRANSCRIPTS) break;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.d(TAG, "Network history fetch skipped: " + e.getMessage());
+        }
+        return remoteEntries;
     }
 
     public static Map<String, List<Entry>> groupEntries(List<Entry> entries) {
