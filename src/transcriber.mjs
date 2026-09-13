@@ -9,8 +9,88 @@ import { gateAudio, summarizeGate } from "./gate.mjs";
 import { createSpeakerEmbedder } from "./speaker.mjs";
 import { loadVoiceProfile, profileCompatibility } from "./profile.mjs";
 
-const SOCKET_PATH = process.env.WHISPER_SOCKET || "/tmp/orca_whisper.sock";
-const HANDY_BIN = process.env.HANDY_BIN || "/home/qqp/.local/bin/handy";
+const DEFAULT_SOCKET_PATH = "/tmp/orca_whisper.sock";
+const DEFAULT_HANDY_BIN = "/home/qqp/.local/bin/handy";
+
+/**
+ * Hard cap for a single warm-daemon socket exchange: 15 seconds. The daemon is
+ * expected to answer in milliseconds; anything slower means it is wedged and
+ * the pipeline must fall back to spawning `handy` directly instead of hanging
+ * the request (the previous cap was 10 minutes).
+ */
+export const WHISPER_SOCKET_TIMEOUT_MS = 15_000;
+
+/** Upper bound for one `handy --transcribe-file` run before it is killed. */
+export const HANDY_TIMEOUT_MS = 600_000;
+
+/**
+ * Device registry indices reported by `handy --list-devices` on this host:
+ *   0 = AMD Radeon 780M (integrated), 1 = NVIDIA RTX A2000, 2 = CPU.
+ * Overridable per host so the cascade is not hard-wired to one machine.
+ */
+export const HANDY_DEVICE_INDEX = Object.freeze({
+  igpu: 0,
+  gpu: 1,
+  cpu: 2,
+});
+
+function envString(name, fallback) {
+  const value = process.env[name];
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function envNumber(name, fallback) {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function envIndex(name, fallback) {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function socketPath() {
+  return envString("WHISPER_SOCKET", DEFAULT_SOCKET_PATH);
+}
+
+function handyBin() {
+  return envString("HANDY_BIN", DEFAULT_HANDY_BIN);
+}
+
+/**
+ * Ordered backend cascade used by {@link defaultTranscribe}. Each tier fails
+ * over to the next one, so a wedged socket daemon or a GPU that cannot allocate
+ * VRAM degrades to the iGPU and finally to the CPU instead of hanging.
+ */
+export function transcribeTiers() {
+  return [
+    {
+      backend: "daemon_gpu",
+      kind: "socket",
+      label: "warm Whisper daemon (RTX A2000)",
+      socketPath: socketPath(),
+      timeoutMs: envNumber("WHISPER_SOCKET_TIMEOUT_MS", WHISPER_SOCKET_TIMEOUT_MS),
+    },
+    {
+      backend: "handy_direct_gpu",
+      kind: "handy",
+      label: "handy direct (RTX A2000)",
+      deviceIndex: envIndex("HANDY_DEVICE_INDEX_GPU", HANDY_DEVICE_INDEX.gpu),
+    },
+    {
+      backend: "handy_direct_igpu",
+      kind: "handy",
+      label: "handy direct (Radeon 780M)",
+      deviceIndex: envIndex("HANDY_DEVICE_INDEX_IGPU", HANDY_DEVICE_INDEX.igpu),
+    },
+    {
+      backend: "handy_direct_cpu",
+      kind: "handy",
+      label: "handy direct (CPU)",
+      deviceIndex: envIndex("HANDY_DEVICE_INDEX_CPU", HANDY_DEVICE_INDEX.cpu),
+    },
+  ];
+}
 
 /**
  * Anti-hallucination filter to scrub Whisper silence hallucinations and trailing artifacts.
@@ -71,53 +151,114 @@ export function convertToWav(inputPath, outputPath) {
 
 /**
  * Query the running Whisper daemon on Unix domain socket.
+ *
+ * Resolves with the daemon's JSON payload only on a clean 200 response with
+ * `ok !== false`. Every other outcome - transport error, timeout, non-200
+ * status, malformed JSON or an explicit `{ ok: false }` payload - rejects so
+ * the caller can immediately fall back to the next backend instead of
+ * returning empty text and leaving the client stuck on "Processing...".
+ *
+ * @param {string} wavPath
+ * @param {string} reqId
+ * @param {{socketPath?: string, timeoutMs?: number}} [options]
  */
-function queryWhisperSocket(wavPath, reqId) {
+export function queryWhisperSocket(wavPath, reqId, options = {}) {
+  const targetSocket = options.socketPath || socketPath();
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? options.timeoutMs
+    : envNumber("WHISPER_SOCKET_TIMEOUT_MS", WHISPER_SOCKET_TIMEOUT_MS);
+  const maxBodyBytes = 1024 * 1024;
+
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify({ wav: wavPath, id: reqId });
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+    const succeed = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
     const req = http.request({
-      socketPath: SOCKET_PATH,
+      socketPath: targetSocket,
       path: "/",
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(postData)
       },
-      timeout: 600000 // 10 minutes for arbitrarily long recordings
+      timeout: timeoutMs
     }, (res) => {
       let body = "";
-      res.on("data", chunk => body += chunk);
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        if (body.length < maxBodyBytes) body += chunk;
+      });
+      res.on("error", fail);
+      res.on("aborted", () => fail(new Error("Whisper socket response aborted")));
       res.on("end", () => {
-        try {
-          const parsed = JSON.parse(body);
-          resolve(parsed);
-        } catch (e) {
-          reject(new Error(`Invalid JSON from whisper daemon: ${body}`));
+        if (res.statusCode !== 200) {
+          fail(new Error(`Whisper daemon HTTP ${res.statusCode}: ${body.trim().slice(0, 200) || "no body"}`));
+          return;
         }
+        let parsed;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          fail(new Error(`Invalid JSON from whisper daemon: ${body.trim().slice(0, 200)}`));
+          return;
+        }
+        if (parsed && typeof parsed === "object" && parsed.ok === false) {
+          const detail = parsed.error || parsed.message || JSON.stringify(parsed).slice(0, 200);
+          fail(new Error(`Whisper daemon reported failure: ${detail}`));
+          return;
+        }
+        succeed(parsed);
       });
     });
 
-    req.on("error", reject);
+    req.on("error", fail);
     req.on("timeout", () => {
       req.destroy();
-      reject(new Error("Whisper socket timeout"));
+      fail(new Error(`Whisper socket timeout after ${timeoutMs}ms`));
     });
 
-    req.write(postData);
-    req.end();
+    try {
+      req.write(postData);
+      req.end();
+    } catch (error) {
+      // Broken pipe / already-destroyed socket: fail over immediately.
+      fail(error);
+    }
   });
 }
 
 /**
- * Fallback to executing handy directly if socket is down.
+ * Fallback to executing handy directly if the socket daemon is unavailable.
+ *
+ * @param {string} wavPath
+ * @param {{deviceIndex?: number, bin?: string, timeoutMs?: number, env?: object}} [options]
  */
-function queryHandyDirect(wavPath) {
+export function queryHandyDirect(wavPath, options = {}) {
+  const bin = options.bin || handyBin();
+  const deviceIndex = Number.isFinite(options.deviceIndex)
+    ? options.deviceIndex
+    : envIndex("HANDY_DEVICE_INDEX_GPU", HANDY_DEVICE_INDEX.gpu);
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? options.timeoutMs
+    : envNumber("HANDY_TIMEOUT_MS", HANDY_TIMEOUT_MS);
+
   return new Promise((resolve, reject) => {
     const start = Date.now();
-    const child = spawn(HANDY_BIN, [
+    const child = spawn(bin, [
       "--transcribe-file", wavPath,
       "--model", "turbo",
-      "--device-index", "1",
+      "--device-index", String(deviceIndex),
       "--json"
     ], {
       env: {
@@ -125,15 +266,39 @@ function queryHandyDirect(wavPath) {
         DISPLAY: process.env.DISPLAY || ":0",
         GDK_BACKEND: process.env.GDK_BACKEND || "x11",
         MESA_VK_DEVICE_SELECT: process.env.MESA_VK_DEVICE_SELECT || "1002:1900",
+        ...(options.env || {}),
       }
     });
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let timer = null;
+
     child.stdout.on("data", chunk => stdout += chunk);
     child.stderr.on("data", chunk => stderr += chunk);
 
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+
+    timer = setTimeout(() => {
+      try { child.kill("SIGTERM"); } catch {}
+      // A killed process can leave grandchildren holding the stdio pipes open,
+      // so surface the timeout now instead of waiting for 'close'.
+      try { child.stdout?.destroy(); } catch {}
+      try { child.stderr?.destroy(); } catch {}
+      fail(new Error(`handy timed out after ${timeoutMs}ms (device ${deviceIndex})`));
+    }, timeoutMs);
+    timer.unref?.();
+
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       const transcribeMs = Date.now() - start;
       if (code === 0) {
         try {
@@ -144,33 +309,53 @@ function queryHandyDirect(wavPath) {
           resolve({ ok: true, text: match ? match[1] : stdout.trim(), transcribe_ms: transcribeMs });
         }
       } else {
-        reject(new Error(`handy process failed (code ${code}): ${stderr}`));
+        reject(new Error(`handy process failed (code ${code}, device ${deviceIndex}): ${stderr.trim().slice(0, 300)}`));
       }
     });
 
-    child.on("error", reject);
+    child.on("error", fail);
   });
 }
 
 /**
- * Default Whisper backend: warm daemon over the unix socket, handy as fallback.
+ * Default Whisper backend: warm daemon over the unix socket, then `handy`
+ * spawned directly on the RTX A2000, then the Radeon 780M iGPU, then the CPU.
+ * Each tier starts only after the previous one failed or was rejected.
+ *
+ * @param {string} wavPath
+ * @param {string} reqId
+ * @param {{tiers?: object[], socketQuery?: Function, handyQuery?: Function}} [options]
  */
-async function defaultTranscribe(wavPath, reqId) {
-  try {
-    const resp = await queryWhisperSocket(wavPath, reqId);
-    return {
-      text: typeof resp?.text === "string" ? resp.text : "",
-      transcribe_ms: resp?.transcribe_ms,
-      backend: "daemon_gpu",
-    };
-  } catch {
-    const resp = await queryHandyDirect(wavPath);
-    return {
-      text: typeof resp?.text === "string" ? resp.text : "",
-      transcribe_ms: resp?.transcribe_ms,
-      backend: "handy_direct_gpu",
-    };
+export async function defaultTranscribe(wavPath, reqId, options = {}) {
+  const tiers = options.tiers || transcribeTiers();
+  const socketQuery = options.socketQuery || queryWhisperSocket;
+  const handyQuery = options.handyQuery || queryHandyDirect;
+  const attempts = [];
+
+  for (const tier of tiers) {
+    try {
+      const resp = tier.kind === "socket"
+        ? await socketQuery(wavPath, reqId, { socketPath: tier.socketPath, timeoutMs: tier.timeoutMs })
+        : await handyQuery(wavPath, { deviceIndex: tier.deviceIndex, bin: tier.bin, timeoutMs: tier.timeoutMs });
+
+      return {
+        text: typeof resp?.text === "string" ? resp.text : "",
+        transcribe_ms: resp?.transcribe_ms,
+        backend: tier.backend,
+        attempts,
+      };
+    } catch (error) {
+      const message = error?.message || String(error);
+      attempts.push({ backend: tier.backend, error: message });
+      console.warn(`[transcriber] ${tier.backend} unavailable: ${message}`);
+    }
   }
+
+  const failure = new Error(
+    `All Whisper backends failed: ${attempts.map((a) => `${a.backend} (${a.error})`).join(" | ")}`,
+  );
+  failure.attempts = attempts;
+  throw failure;
 }
 
 /**
@@ -288,7 +473,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
 
     fs.writeFileSync(filteredWavPath, audioToTranscribe);
 
-    // 4. Transcribe via warm Whisper Daemon on RTX A2000
+    // 4. Transcribe via the backend cascade (warm daemon -> dGPU -> iGPU -> CPU)
     const transcribe = options.transcribe || defaultTranscribe;
     const resp = await transcribe(filteredWavPath, reqId);
 
@@ -304,6 +489,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
       audioSentMs: Math.round((audioToTranscribe.length - 44) / 32),
       transcribeMs: resp?.transcribe_ms || (Date.now() - startTime),
       backend: resp?.backend || "daemon_gpu",
+      backendAttempts: resp?.attempts,
       gate: summarizeGate(gate),
     };
   } finally {

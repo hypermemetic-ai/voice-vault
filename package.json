@@ -8,6 +8,7 @@
     "start": "node src/server.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "test:fast": "node --test test/wav.test.mjs test/vad.test.mjs test/speaker.test.mjs",
+    "test:e2e": "VOICE_VAULT_E2E=1 node --test test/transcribe-e2e.test.mjs",
     "speaker:list-models": "node scripts/fetch-speaker-model.mjs --list",
     "speaker:fetch-model": "node scripts/fetch-speaker-model.mjs",
     "speaker:setup": "bash scripts/setup-speaker-runtime.sh",
