@@ -77,7 +77,6 @@ public class MainActivity extends Activity {
 
         android.net.Uri referrer = getReferrer();
         String ref = (referrer != null && referrer.getHost() != null) ? referrer.getHost().toLowerCase() : "";
-        int flags = intent.getFlags();
         boolean fromNotification = intent.getBooleanExtra("from_notification", false);
         boolean explicitQuickToggle = intent.getBooleanExtra("quick_toggle", false);
         boolean fromSystemUi = ref.contains("systemui");
@@ -93,13 +92,17 @@ public class MainActivity extends Activity {
         // FLAG_ACTIVITY_RESET_TASK_IF_NEEDED is likewise not a launcher signal:
         // PackageManager.getLaunchIntentForPackage() always sets it.
         boolean fromLauncher = hasSourceBounds;
-        boolean fromHistory = (flags & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0;
 
-        // Anything launched in the background without source bounds, recents history
-        // or a notification is a Quick Tap / hardware trigger: toggle the recording
+        // Anything launched in the background without source bounds or a
+        // notification is a Quick Tap / hardware trigger: toggle the recording
         // service headlessly instead of opening the dashboard window.
+        // FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY must NOT be consulted: Android's
+        // ActivityTaskManager attaches it to any background launch via
+        // PackageManager.getLaunchIntentForPackage() once the app has a task in
+        // recents, so requiring its absence misclassified every Columbus Quick
+        // Tap as a dashboard open.
         boolean isQuickToggle = explicitQuickToggle || fromSystemUi
-                || (!fromLauncher && !fromHistory && !fromNotification);
+                || (!fromLauncher && !fromNotification);
 
         if (isQuickToggle) {
             if (Build.VERSION.SDK_INT >= 34) {
@@ -122,7 +125,6 @@ public class MainActivity extends Activity {
                 startService(serviceIntent);
             }
 
-            moveTaskToBack(true);
             finish();
             if (Build.VERSION.SDK_INT >= 34) {
                 overrideActivityTransition(OVERRIDE_TRANSITION_CLOSE, 0, 0);
