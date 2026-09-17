@@ -181,11 +181,11 @@ public class MainActivity extends Activity {
         }
 
         // Auto-send on paste: after Vol Dn pastes the transcript, submit it
-        // with IME Enter. Shared with VoiceVaultKeyService.
+        // with IME Enter and send button click. Shared with VoiceVaultKeyService.
         mCheckboxAutoSend = findViewById(R.id.checkbox_auto_send);
         if (mCheckboxAutoSend != null) {
             SharedPreferences prefs = getSharedPreferences("voice_vault_prefs", MODE_PRIVATE);
-            mCheckboxAutoSend.setChecked(prefs.getBoolean("pref_auto_send_on_paste", false));
+            mCheckboxAutoSend.setChecked(prefs.getBoolean("pref_auto_send_on_paste", true));
             mCheckboxAutoSend.setOnCheckedChangeListener((buttonView, isChecked) ->
                     prefs.edit().putBoolean("pref_auto_send_on_paste", isChecked).apply());
         }
