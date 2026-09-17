@@ -68,6 +68,52 @@
                 android:textSize="12sp"
                 android:textStyle="bold"
                 android:fontFamily="@font/urw_gothic_demi" />
+
+            <TextView
+                android:id="@+id/btn_open_setup"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="⚙ SETUP"
+                android:textColor="#AAAAAA"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:fontFamily="@font/urw_gothic_demi"
+                android:paddingStart="12dp"
+                android:clickable="true" />
+        </LinearLayout>
+
+        <!-- Setup warning banner: visible when Accessibility or Mic is broken.
+             1-tap navigation into the Setup & Diagnostics Guide. -->
+        <LinearLayout
+            android:id="@+id/banner_setup_warning"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#1A0A0A"
+            android:padding="10dp"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone"
+            android:clickable="true">
+
+            <TextView
+                android:id="@+id/tv_setup_warning"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="#EF4444"
+                android:textSize="12sp"
+                android:fontFamily="@font/urw_gothic_demi" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="FIX →"
+                android:textColor="#EF4444"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:fontFamily="@font/urw_gothic_demi"
+                android:paddingStart="8dp" />
         </LinearLayout>
 
         <!-- Center Dictation Control: Centered and Balanced.

@@ -13,6 +13,9 @@ const KEY_SERVICE = "android/src/ai/hypermemetic/voicevault/VoiceVaultKeyService
 const TILE_SERVICE = "android/src/ai/hypermemetic/voicevault/VoiceVaultTileService.java";
 const MANIFEST = "android/AndroidManifest.xml";
 const LAYOUT = "android/res/layout/activity_main.xml";
+const SETUP_ACTIVITY = "android/src/ai/hypermemetic/voicevault/SetupActivity.java";
+const SETUP_DIAGNOSTICS = "android/src/ai/hypermemetic/voicevault/SetupDiagnostics.java";
+const SETUP_LAYOUT = "android/res/layout/activity_setup.xml";
 
 test("MainActivity does not prompt for POST_NOTIFICATIONS", () => {
   const source = read(MAIN_ACTIVITY);
@@ -109,11 +112,92 @@ test("manifest wires tile long-press and bumps version", () => {
     "MainActivity must declare QS_TILE_PREFERENCES",
   );
   assert.ok(
-    manifest.includes('android:versionCode="16"'),
-    "expected versionCode 16",
+    manifest.includes('android:versionCode="17"'),
+    "expected versionCode 17",
   );
   assert.ok(
-    manifest.includes('android:versionName="1.2.12"'),
-    "expected versionName 1.2.12",
+    manifest.includes('android:versionName="1.2.13"'),
+    "expected versionName 1.2.13",
+  );
+});
+
+test("SetupDiagnostics inspects real system states and builds deep links", () => {
+  const source = read(SETUP_DIAGNOSTICS);
+  for (const token of [
+    "isMicGranted",
+    "isAccessibilityEnabled",
+    "isOverlayGranted",
+    "isBatteryOptimizationIgnored",
+    "isNotificationBlocked",
+    "ENABLED_ACCESSIBILITY_SERVICES",
+    "VoiceVaultKeyService",
+    "Settings.canDrawOverlays",
+    "isIgnoringBatteryOptimizations",
+    "RECORD_AUDIO",
+    "areNotificationsEnabled",
+    "ACTION_ACCESSIBILITY_SETTINGS",
+    "ACTION_MANAGE_OVERLAY_PERMISSION",
+    "ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+    "ACTION_APPLICATION_DETAILS_SETTINGS",
+    "ActivityNotFoundException",
+    "requestAddTileService",
+  ]) {
+    assert.ok(source.includes(token), `SetupDiagnostics.java must reference ${token}`);
+  }
+});
+
+test("SetupActivity renders six live cards and refreshes on resume", () => {
+  const source = read(SETUP_ACTIVITY);
+  const layout = read(SETUP_LAYOUT);
+  for (const token of [
+    "onResume",
+    "refreshStatuses",
+    "OPEN ACCESSIBILITY SETTINGS",
+    "GRANT PERMISSION",
+    "OPEN OVERLAY SETTINGS",
+    "DISABLE BATTERY OPTIMIZATION",
+    "ADD TILE TO QUICK SETTINGS",
+    "NOTIFICATION SETTINGS",
+    "Allow restricted settings",
+    "Blocked (Recommended)",
+  ]) {
+    assert.ok(source.includes(token), `SetupActivity.java must reference ${token}`);
+  }
+  assert.ok(
+    layout.includes("layout_setup_cards"),
+    "activity_setup.xml must contain the cards container",
+  );
+  assert.ok(
+    layout.includes("SETUP"),
+    "activity_setup.xml must contain the guide header",
+  );
+});
+
+test("MainActivity exposes setup guide entry and critical warning banner", () => {
+  const activity = read(MAIN_ACTIVITY);
+  const layout = read(LAYOUT);
+  for (const token of [
+    "SetupActivity",
+    "banner_setup_warning",
+    "refreshSetupBanner",
+    "Dictation keys unavailable",
+    "btn_open_setup",
+  ]) {
+    assert.ok(activity.includes(token), `MainActivity.java must reference ${token}`);
+  }
+  for (const token of ["btn_open_setup", "banner_setup_warning", "tv_setup_warning"]) {
+    assert.ok(layout.includes(token), `activity_main.xml must contain ${token}`);
+  }
+});
+
+test("manifest declares SetupActivity and battery permission", () => {
+  const manifest = read(MANIFEST);
+  assert.ok(
+    manifest.includes('android:name=".SetupActivity"'),
+    "manifest must declare SetupActivity",
+  );
+  assert.ok(
+    manifest.includes("android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"),
+    "manifest must request REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
   );
 });

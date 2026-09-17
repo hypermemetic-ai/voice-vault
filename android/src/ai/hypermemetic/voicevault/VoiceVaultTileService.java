@@ -22,12 +22,22 @@ public class VoiceVaultTileService extends TileService {
     @Override
     public void onTileAdded() {
         super.onTileAdded();
+        SetupDiagnostics.setTileAdded(this, true);
         updateTileState();
+    }
+
+    @Override
+    public void onTileRemoved() {
+        super.onTileRemoved();
+        SetupDiagnostics.setTileAdded(this, false);
     }
 
     @Override
     public void onStartListening() {
         super.onStartListening();
+        // Listening implies the tile is in the shade; also heals the flag
+        // for tiles added before this tracking existed.
+        SetupDiagnostics.setTileAdded(this, true);
         updateTileState();
     }
 

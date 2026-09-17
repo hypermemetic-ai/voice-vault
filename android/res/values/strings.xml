@@ -11,6 +11,7 @@
     <string name="quick_tap_name">Voice Vault (Quick Toggle)</string>
     <string name="transcripts_title">Voice Vault</string>
     <string name="enroll_title">Enroll Voice</string>
+    <string name="setup_title">Setup Guide</string>
     <string name="accessibility_desc">Dictation Mode volume keys: Volume Up toggles recording, Volume Down pastes the transcript. Enable via the Quick Settings tile.</string>
     <string name="floating_overlay_channel">Voice Vault Floating Button</string>
 </resources>
