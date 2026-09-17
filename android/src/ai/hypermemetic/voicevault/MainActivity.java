@@ -58,6 +58,8 @@ public class MainActivity extends Activity {
     private Button mBtnExpand;
     private Button mBtnToggleOverlay;
     private Button mBtnVoiceProfile;
+    private View mBannerSetupWarning;
+    private TextView mTvSetupWarning;
     private CheckBox mCheckboxAutoSend;
     private boolean mTranscriptExpanded = false;
     private final ExecutorService mProfileExecutor = Executors.newSingleThreadExecutor();
@@ -164,6 +166,20 @@ public class MainActivity extends Activity {
         mBtnVoiceProfile.setOnClickListener(v ->
                 startActivity(new Intent(MainActivity.this, VoiceEnrollActivity.class)));
 
+        // Setup & Diagnostics Guide entry point (top bar) plus the critical
+        // warning banner. Both offer 1-tap navigation to SetupActivity.
+        View btnOpenSetup = findViewById(R.id.btn_open_setup);
+        if (btnOpenSetup != null) {
+            btnOpenSetup.setOnClickListener(v ->
+                    startActivity(new Intent(MainActivity.this, SetupActivity.class)));
+        }
+        mBannerSetupWarning = findViewById(R.id.banner_setup_warning);
+        mTvSetupWarning = findViewById(R.id.tv_setup_warning);
+        if (mBannerSetupWarning != null) {
+            mBannerSetupWarning.setOnClickListener(v ->
+                    startActivity(new Intent(MainActivity.this, SetupActivity.class)));
+        }
+
         // Auto-send on paste: after Vol Dn pastes the transcript, submit it
         // with IME Enter. Shared with VoiceVaultKeyService.
         mCheckboxAutoSend = findViewById(R.id.checkbox_auto_send);
@@ -234,6 +250,7 @@ public class MainActivity extends Activity {
         checkAndRequestPermissions();
         setupReceiver();
         syncWithServiceState();
+        refreshSetupBanner();
         populateLatestTranscriptIfNeeded();
     }
 
@@ -713,7 +730,37 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         syncWithServiceState();
+        refreshSetupBanner();
         refreshVoiceProfileStatus();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        refreshSetupBanner();
+    }
+
+    /**
+     * Show the dashboard warning banner when a critical service is broken
+     * (Accessibility off or microphone denied) so the user immediately knows
+     * why the dictation keys aren't working. Hidden when all is well.
+     */
+    private void refreshSetupBanner() {
+        if (mBannerSetupWarning == null || mTvSetupWarning == null) return;
+        boolean a11yOk = SetupDiagnostics.isAccessibilityEnabled(this);
+        boolean micOk = SetupDiagnostics.isMicGranted(this);
+        if (a11yOk && micOk) {
+            mBannerSetupWarning.setVisibility(View.GONE);
+            return;
+        }
+        StringBuilder reason = new StringBuilder();
+        if (!a11yOk) reason.append("Accessibility off");
+        if (!micOk) {
+            if (reason.length() > 0) reason.append(" · ");
+            reason.append("Mic denied");
+        }
+        mTvSetupWarning.setText("⚠ Dictation keys unavailable — " + reason + ". Tap to fix.");
+        mBannerSetupWarning.setVisibility(View.VISIBLE);
     }
 
     /**
