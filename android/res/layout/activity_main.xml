@@ -215,6 +215,24 @@
                 android:fontFamily="@font/urw_gothic_book" />
         </LinearLayout>
 
+        <!-- Dictation Settings: Volume-Key Mode -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:paddingTop="4dp">
+
+            <CheckBox
+                android:id="@+id/checkbox_auto_send"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Auto-send on paste (Vol Dn)"
+                android:textColor="#AAAAAA"
+                android:textSize="12sp"
+                android:fontFamily="@font/urw_gothic_book" />
+        </LinearLayout>
+
         </LinearLayout>
     </ScrollView>
 

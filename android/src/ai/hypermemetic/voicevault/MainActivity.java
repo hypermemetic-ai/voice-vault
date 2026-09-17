@@ -8,6 +8,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
@@ -23,6 +24,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
@@ -56,6 +58,7 @@ public class MainActivity extends Activity {
     private Button mBtnExpand;
     private Button mBtnToggleOverlay;
     private Button mBtnVoiceProfile;
+    private CheckBox mCheckboxAutoSend;
     private boolean mTranscriptExpanded = false;
     private final ExecutorService mProfileExecutor = Executors.newSingleThreadExecutor();
 
@@ -160,6 +163,16 @@ public class MainActivity extends Activity {
         mBtnVoiceProfile = findViewById(R.id.btn_voice_profile);
         mBtnVoiceProfile.setOnClickListener(v ->
                 startActivity(new Intent(MainActivity.this, VoiceEnrollActivity.class)));
+
+        // Auto-send on paste: after Vol Dn pastes the transcript, submit it
+        // with IME Enter. Shared with VoiceVaultKeyService.
+        mCheckboxAutoSend = findViewById(R.id.checkbox_auto_send);
+        if (mCheckboxAutoSend != null) {
+            SharedPreferences prefs = getSharedPreferences("voice_vault_prefs", MODE_PRIVATE);
+            mCheckboxAutoSend.setChecked(prefs.getBoolean("pref_auto_send_on_paste", false));
+            mCheckboxAutoSend.setOnCheckedChangeListener((buttonView, isChecked) ->
+                    prefs.edit().putBoolean("pref_auto_send_on_paste", isChecked).apply());
+        }
 
         // Drawer views
         mBtnOpenHistory = findViewById(R.id.btn_open_history);
@@ -570,21 +583,12 @@ public class MainActivity extends Activity {
 
     private void checkAndRequestPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // Notifications stay disabled by user choice; the foreground
+            // service notification is silenced via IMPORTANCE_MIN instead.
             boolean needAudio = checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED;
-            boolean needNotif = false;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                needNotif = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED;
-            }
 
-            if (needAudio || needNotif) {
-                if (needNotif) {
-                    requestPermissions(new String[]{
-                            Manifest.permission.RECORD_AUDIO,
-                            Manifest.permission.POST_NOTIFICATIONS
-                    }, PERMISSION_REQ_CODE);
-                } else {
-                    requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, PERMISSION_REQ_CODE);
-                }
+            if (needAudio) {
+                requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, PERMISSION_REQ_CODE);
             }
         }
     }

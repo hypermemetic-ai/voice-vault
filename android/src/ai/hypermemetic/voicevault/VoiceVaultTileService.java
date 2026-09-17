@@ -1,88 +1,71 @@
 package ai.hypermemetic.voicevault;
 
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.service.quicksettings.Tile;
 import android.service.quicksettings.TileService;
 import android.util.Log;
 
+/**
+ * Quick Settings tile that toggles "Dictation Mode".
+ *
+ * When enabled, the hardware volume keys are captured by
+ * {@link VoiceVaultKeyService}: Volume Up toggles recording and Volume Down
+ * pastes the transcript into the focused field. When disabled, volume keys
+ * behave normally.
+ */
 public class VoiceVaultTileService extends TileService {
     private static final String TAG = "VoiceVaultTile";
-    private BroadcastReceiver mReceiver;
+    private static final String PREFS_NAME = "voice_vault_prefs";
+    private static final String PREF_DICTATION_MODE = "pref_dictation_mode_enabled";
+
+    @Override
+    public void onTileAdded() {
+        super.onTileAdded();
+        updateTileState();
+    }
 
     @Override
     public void onStartListening() {
         super.onStartListening();
         updateTileState();
-
-        if (mReceiver == null) {
-            mReceiver = new BroadcastReceiver() {
-                @Override
-                public void onReceive(Context context, Intent intent) {
-                    updateTileState();
-                }
-            };
-            IntentFilter filter = new IntentFilter(VoiceVaultService.BROADCAST_STATE_CHANGE);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(mReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-            } else {
-                registerReceiver(mReceiver, filter);
-            }
-        }
-    }
-
-    @Override
-    public void onStopListening() {
-        super.onStopListening();
-        if (mReceiver != null) {
-            try {
-                unregisterReceiver(mReceiver);
-            } catch (Exception ignored) {}
-            mReceiver = null;
-        }
     }
 
     @Override
     public void onClick() {
         super.onClick();
-        boolean recording = VoiceVaultService.isRecording();
-        Intent intent = new Intent(this, VoiceVaultService.class);
-        if (recording) {
-            Log.i(TAG, "Tile clicked: Stopping dictation");
-            intent.setAction(VoiceVaultService.ACTION_STOP);
-        } else {
-            Log.i(TAG, "Tile clicked: Starting dictation");
-            intent.setAction(VoiceVaultService.ACTION_START);
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
-        }
-
+        boolean enabled = !isDictationModeEnabled();
+        setDictationModeEnabled(enabled);
+        Log.i(TAG, "Tile clicked: Dictation Mode " + (enabled ? "ENABLED" : "DISABLED"));
         updateTileState();
+    }
+
+    private boolean isDictationModeEnabled() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        return prefs.getBoolean(PREF_DICTATION_MODE, false);
+    }
+
+    private void setDictationModeEnabled(boolean enabled) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit().putBoolean(PREF_DICTATION_MODE, enabled).apply();
     }
 
     private void updateTileState() {
         Tile tile = getQsTile();
         if (tile == null) return;
 
-        boolean active = VoiceVaultService.isRecording();
-        if (active) {
+        boolean enabled = isDictationModeEnabled();
+        if (enabled) {
             tile.setState(Tile.STATE_ACTIVE);
-            tile.setLabel(getString(R.string.tile_recording));
+            tile.setLabel("Vol Up: Rec | Vol Dn: Paste");
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                tile.setSubtitle("Tap to Finish");
+                tile.setSubtitle("Vol Up: Rec | Vol Dn: Paste");
             }
         } else {
             tile.setState(Tile.STATE_INACTIVE);
             tile.setLabel(getString(R.string.tile_name));
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                tile.setSubtitle("Tap to Record");
+                tile.setSubtitle("Tap to Enable");
             }
         }
         tile.updateTile();

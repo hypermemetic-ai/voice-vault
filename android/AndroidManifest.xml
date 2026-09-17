@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="ai.hypermemetic.voicevault"
-    android:versionCode="6"
-    android:versionName="1.2.2">
+    android:versionCode="16"
+    android:versionName="1.2.12">
 
     <uses-sdk
         android:minSdkVersion="26"
@@ -48,6 +48,10 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Long-pressing the Quick Settings tile opens the dashboard -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
         </activity>
 

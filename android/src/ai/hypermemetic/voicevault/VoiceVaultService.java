@@ -100,7 +100,7 @@ public class VoiceVaultService extends Service {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
                     getString(R.string.channel_name),
-                    NotificationManager.IMPORTANCE_HIGH
+                    NotificationManager.IMPORTANCE_MIN
             );
             channel.setDescription(getString(R.string.channel_desc));
             channel.enableVibration(false);
@@ -134,6 +134,7 @@ public class VoiceVaultService extends Service {
                 .setContentText(timerText + " — Tap Stop when finished")
                 .setSmallIcon(R.drawable.ic_mic)
                 .setContentIntent(piActivity)
+                .setOnlyAlertOnce(true)
                 .setOngoing(true)
                 .addAction(new Notification.Action.Builder(
                         R.drawable.ic_stop,
@@ -289,10 +290,9 @@ public class VoiceVaultService extends Service {
                         long sec = (elapsed / 1000) % 60;
                         long min = (elapsed / 1000) / 60;
                         String formatted = String.format("%02d:%02d", min, sec);
-                        NotificationManager nm = getSystemService(NotificationManager.class);
-                        if (nm != null) {
-                            nm.notify(NOTIFICATION_ID, buildRecordingNotification(formatted));
-                        }
+                        // Silent mode: the foreground notification is posted
+                        // once via startForeground() and never rebuilt, so the
+                        // OS requirement is met with zero user interruption.
                         FloatingPillOverlay.updateTimer(formatted);
                         sendExplicitBroadcast(new Intent(BROADCAST_STATE_CHANGE));
                         mHandler.postDelayed(this, 1000);
