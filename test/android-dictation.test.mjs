@@ -92,12 +92,17 @@ test("volume keys honor dictation mode (up: record toggle, down: paste)", () => 
   }
 });
 
-test("auto-send on paste preference is exposed in UI and code", () => {
+test("auto-send on paste preference defaults to true in UI and service", () => {
   const activity = read(MAIN_ACTIVITY);
   const layout = read(LAYOUT);
+  const keyService = read(KEY_SERVICE);
   assert.ok(
-    activity.includes("pref_auto_send_on_paste"),
-    "MainActivity.java must bind pref_auto_send_on_paste",
+    activity.includes('prefs.getBoolean("pref_auto_send_on_paste", true)'),
+    "MainActivity.java must default pref_auto_send_on_paste to true",
+  );
+  assert.ok(
+    keyService.includes("prefs.getBoolean(PREF_AUTO_SEND, true)"),
+    "VoiceVaultKeyService.java must default PREF_AUTO_SEND to true",
   );
   assert.ok(
     /auto.send/i.test(layout),
@@ -112,12 +117,84 @@ test("manifest wires tile long-press and bumps version", () => {
     "MainActivity must declare QS_TILE_PREFERENCES",
   );
   assert.ok(
-    manifest.includes('android:versionCode="17"'),
-    "expected versionCode 17",
+    manifest.includes('android:versionCode="18"'),
+    "expected versionCode 18",
   );
   assert.ok(
-    manifest.includes('android:versionName="1.2.13"'),
-    "expected versionName 1.2.13",
+    manifest.includes('android:versionName="1.2.14"'),
+    "expected versionName 1.2.14",
+  );
+});
+
+test("VoiceVaultKeyService implements auto-focus, 0ms block insert, and send button auto-send", () => {
+  const source = read(KEY_SERVICE);
+
+  // Auto-focus target field via findEditableNode DFS
+  assert.ok(
+    source.includes("findFocus") && source.includes("!target.isEditable() && !isEditClass"),
+    "findFocus result must be verified as editable and discarded if non-editable",
+  );
+  assert.ok(
+    source.includes("findEditableNode("),
+    "VoiceVaultKeyService must define findEditableNode",
+  );
+  assert.ok(
+    source.includes("node.isEditable()") && source.includes('.contains("EditText")'),
+    "findEditableNode must match isEditable and EditText className",
+  );
+  assert.ok(
+    source.includes("target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)"),
+    "pasteIntoFocusedField must auto-focus discovered editable field",
+  );
+
+  // 0ms block text insertion via ACTION_SET_TEXT with ACTION_PASTE fallback
+  assert.ok(
+    source.includes("ACTION_SET_TEXT"),
+    "VoiceVaultKeyService must use ACTION_SET_TEXT",
+  );
+  assert.ok(
+    source.includes("ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE"),
+    "VoiceVaultKeyService must pass ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE",
+  );
+  assert.ok(
+    source.includes("ClipboardManager"),
+    "VoiceVaultKeyService must read clipboard content",
+  );
+  assert.ok(
+    source.includes("ACTION_PASTE"),
+    "VoiceVaultKeyService must retain ACTION_PASTE fallback",
+  );
+
+  // Auto-send: findAndClickSendButton and clickable parent traversal
+  assert.ok(
+    source.includes("findAndClickSendButton("),
+    "VoiceVaultKeyService must define findAndClickSendButton",
+  );
+  for (const keyword of ["send", "submit", "send message", "send sms"]) {
+    assert.ok(
+      source.toLowerCase().includes(keyword),
+      `VoiceVaultKeyService must search for send keyword: ${keyword}`,
+    );
+  }
+  assert.ok(
+    source.includes("getContentDescription") && source.includes("getText") && source.includes("getViewIdResourceName"),
+    "findAndClickSendButton must check contentDescription, text, and view ID",
+  );
+  assert.ok(
+    source.includes("getParent()") && source.includes("isClickable()"),
+    "findAndClickSendButton must traverse up to clickable parent wrappers",
+  );
+  assert.ok(
+    source.includes("IME_ENTER_DELAY_MS") && source.includes("ACTION_IME_ENTER"),
+    "auto-send must dispatch ACTION_IME_ENTER with delay",
+  );
+  assert.ok(
+    source.includes("CODEX_EXEC_DELAY_MS") && source.includes("stage2"),
+    "auto-send must provide Stage 2 follow-up dispatch for Codex/terminal execution",
+  );
+  assert.ok(
+    source.includes("recycle()"),
+    "VoiceVaultKeyService must safely recycle traversed accessibility nodes",
   );
 });
 
