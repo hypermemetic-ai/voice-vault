@@ -730,6 +730,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         syncWithServiceState();
+        FloatingPillOverlay.refreshMode(this);
         refreshSetupBanner();
         refreshVoiceProfileStatus();
     }

@@ -39,6 +39,7 @@ public class VoiceVaultTileService extends TileService {
         // for tiles added before this tracking existed.
         SetupDiagnostics.setTileAdded(this, true);
         updateTileState();
+        FloatingPillOverlay.refreshMode(this);
     }
 
     @Override
@@ -46,6 +47,7 @@ public class VoiceVaultTileService extends TileService {
         super.onClick();
         boolean enabled = !isDictationModeEnabled();
         setDictationModeEnabled(enabled);
+        FloatingPillOverlay.refreshMode(this);
         Log.i(TAG, "Tile clicked: Dictation Mode " + (enabled ? "ENABLED" : "DISABLED"));
         updateTileState();
     }

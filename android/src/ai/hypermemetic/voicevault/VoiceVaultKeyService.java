@@ -46,16 +46,25 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private static final long CODEX_EXEC_DELAY_MS = 240;
 
     private static volatile VoiceVaultKeyService sInstance = null;
+    private SharedPreferences mModePrefs;
+    private final SharedPreferences.OnSharedPreferenceChangeListener mModeListener = (prefs, key) -> {
+        if (PREF_DICTATION_MODE.equals(key)) FloatingPillOverlay.refreshMode(this);
+    };
 
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
         sInstance = this;
+        stopWatchingMode();
+        mModePrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        mModePrefs.registerOnSharedPreferenceChangeListener(mModeListener);
+        FloatingPillOverlay.refreshMode(this);
         Log.i(TAG, "Accessibility service connected");
     }
 
     @Override
     public boolean onUnbind(Intent intent) {
+        stopWatchingMode();
         if (sInstance == this) {
             sInstance = null;
         }
@@ -64,10 +73,18 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        stopWatchingMode();
         if (sInstance == this) {
             sInstance = null;
         }
         super.onDestroy();
+    }
+
+    private void stopWatchingMode() {
+        if (mModePrefs != null) {
+            mModePrefs.unregisterOnSharedPreferenceChangeListener(mModeListener);
+            mModePrefs = null;
+        }
     }
 
     /**
