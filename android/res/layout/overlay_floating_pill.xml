@@ -33,7 +33,6 @@
         android:id="@+id/pill_mode"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
         android:singleLine="true"
         android:text="DICT"
         android:textColor="#FFFFFF"
