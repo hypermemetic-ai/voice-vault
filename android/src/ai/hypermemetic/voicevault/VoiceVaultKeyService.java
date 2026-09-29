@@ -54,12 +54,13 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private static final String PREF_AUTO_SEND = "pref_auto_send_on_paste";
     private static final long IME_ENTER_DELAY_MS = 60;
     private static final long FOLLOWUP_SEND_DELAY_MS = 240;
-    private static final long DOWN_WINDOW_MS = 320;
 
     private static volatile VoiceVaultKeyService sInstance = null;
 
     private final Handler mKeyHandler = new Handler(Looper.getMainLooper());
     private final VolumeUpTiming mVolUpTiming = new VolumeUpTiming();
+    // Same deadline logic, independent first-press state for Down.
+    private final VolumeUpTiming mVolDnTiming = new VolumeUpTiming();
     private Runnable mPendingVolUpRunnable = null;
     private Runnable mPendingVolDnRunnable = null;
     private final PendingDictation mPendingDictation = new PendingDictation();
@@ -113,6 +114,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private void cancelPendingKeyCallbacks() {
         mPendingDictation.cancel();
         mVolUpTiming.reset();
+        mVolDnTiming.reset();
         if (mPendingVolUpRunnable != null) {
             mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
             mPendingVolUpRunnable = null;
@@ -251,7 +253,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     Log.i(TAG, "Dictation Mode: expired Vol Up single-press -> toggle recording");
                     toggleDictation();
                 }
-                // Run just after the inclusive 250ms boundary, so a press at 250ms can win.
+                // Run just after the inclusive 220ms boundary, so a press at 220ms can win.
                 Runnable single = new Runnable() {
                     @Override public void run() {
                         if (mPendingVolUpRunnable != this) return;
@@ -266,7 +268,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 mKeyHandler.postDelayed(single, VolumeUpTiming.UP_WINDOW_MS + 1);
                 return true;
             } else if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-                if (mPendingVolDnRunnable != null) {
+                VolumeUpTiming.ActivePress press = mVolDnTiming.activePress(SystemClock.uptimeMillis());
+                if (press == VolumeUpTiming.ActivePress.DOUBLE) {
                     // Double-press Volume Down while active -> TOGGLE auto-send
                     mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
                     mPendingVolDnRunnable = null;
@@ -275,16 +278,26 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     Log.i(TAG, "Dictation Mode ON: Vol Dn double-press -> auto-send " + (newAutoSend ? "ENABLED" : "DISABLED"));
                     provideFeedback(newAutoSend, "Auto-send: " + (newAutoSend ? "ON" : "OFF"));
                     return true;
-                } else {
-                    // Single press debounce
-                    mPendingVolDnRunnable = () -> {
+                }
+                if (press == VolumeUpTiming.ActivePress.EXPIRED_FIRST) {
+                    // Handler may be late: finish the first single before starting a new window.
+                    mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
+                    mPendingVolDnRunnable = null;
+                    Log.i(TAG, "Dictation Mode: expired Vol Dn single-press -> finish and insert");
+                    finishAndInsert();
+                }
+                Runnable single = new Runnable() {
+                    @Override public void run() {
+                        if (mPendingVolDnRunnable != this) return;
                         mPendingVolDnRunnable = null;
+                        mVolDnTiming.activeSingleFinished();
                         Log.i(TAG, "Dictation Mode: Vol Dn single-press -> finish and insert");
                         finishAndInsert();
-                    };
-                    mKeyHandler.postDelayed(mPendingVolDnRunnable, DOWN_WINDOW_MS);
-                    return true;
-                }
+                    }
+                };
+                mPendingVolDnRunnable = single;
+                mKeyHandler.postDelayed(single, VolumeUpTiming.UP_WINDOW_MS + 1);
+                return true;
             }
         }
 
