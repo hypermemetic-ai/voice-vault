@@ -104,11 +104,7 @@ public class FloatingPillOverlay {
             int minHeight = Math.round((idle ? 28 : 40) * sContext.getResources().getDisplayMetrics().density);
             sPillView.setMinimumHeight(minHeight);
             sPillView.setMinimumWidth(idle ? 0 : Math.round(110 * sContext.getResources().getDisplayMetrics().density));
-            sModeText.setVisibility(mode ? View.VISIBLE : View.GONE);
-            android.widget.LinearLayout.LayoutParams modeParams =
-                    (android.widget.LinearLayout.LayoutParams) sModeText.getLayoutParams();
-            modeParams.setMarginStart(idle ? 0 : Math.round(8 * sContext.getResources().getDisplayMetrics().density));
-            sModeText.setLayoutParams(modeParams);
+            sModeText.setVisibility(mode && idle ? View.VISIBLE : View.GONE);
             sTvText.setVisibility(idle ? View.GONE : View.VISIBLE);
             sTvText.setText(status.text);
             sTvText.setTextSize(recording ? 15f : 14f);
@@ -148,7 +144,8 @@ public class FloatingPillOverlay {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         // Android 12+ rejects touches through an untrusted overlay above 0.8 obscuring opacity.
-        params.alpha = 0.7f;
+        // Keep the solid backdrop and text together below that threshold.
+        params.alpha = 0.79f;
         params.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
         params.y = statusBarHeight + Math.round(18 * density);
         sWindowManager.addView(sPillView, params);
