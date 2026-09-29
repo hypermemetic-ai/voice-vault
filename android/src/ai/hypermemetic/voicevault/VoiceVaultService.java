@@ -54,6 +54,7 @@ public class VoiceVaultService extends Service {
     private PowerManager.WakeLock mWakeLock = null;
     private Handler mHandler = null;
     private Runnable mTimerRunnable = null;
+    private int mGeneration = 0;
     private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
 
     public static boolean isRecording() {
@@ -229,6 +230,7 @@ public class VoiceVaultService extends Service {
     }
 
     private void startRecording() {
+        mGeneration++;
         try {
             PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
             if (pm != null) {
@@ -320,6 +322,8 @@ public class VoiceVaultService extends Service {
         }
 
         final long durationMs = System.currentTimeMillis() - sRecordingStartTime;
+        final long recordingId = sRecordingStartTime;
+        final int generation = mGeneration;
 
         try {
             if (mRecorder != null) {
@@ -382,7 +386,9 @@ public class VoiceVaultService extends Service {
                     JSONObject json = new JSONObject(responseBody);
                     String text = json.optString("text", "");
 
-                    mHandler.post(() -> onTranscriptionSuccess(text, durationMs));
+                    mHandler.post(() -> {
+                        if (generation == mGeneration) onTranscriptionSuccess(text, durationMs, recordingId);
+                    });
                 } else {
                     throw new Exception("HTTP error " + code);
                 }
@@ -390,6 +396,8 @@ public class VoiceVaultService extends Service {
             } catch (Exception e) {
                 Log.e(TAG, "Transcription failed", e);
                 mHandler.post(() -> {
+                    if (generation != mGeneration) return;
+                    VoiceVaultKeyService.onTranscriptionFinished(recordingId, null);
                     sIsProcessing = false;
                     FloatingPillOverlay.showSuccess("Error");
                     cleanup();
@@ -398,7 +406,7 @@ public class VoiceVaultService extends Service {
         });
     }
 
-    private void onTranscriptionSuccess(String text, long durationMs) {
+    private void onTranscriptionSuccess(String text, long durationMs, long recordingId) {
         sIsProcessing = false;
         if (text != null && !text.trim().isEmpty()) {
             sLastTranscript = text.trim();
@@ -433,10 +441,13 @@ public class VoiceVaultService extends Service {
         } else {
             FloatingPillOverlay.showSuccess("No speech");
         }
+        VoiceVaultKeyService.onTranscriptionFinished(recordingId, text);
         cleanup();
     }
 
     private void cancelRecording() {
+        mGeneration++;
+        VoiceVaultKeyService.onTranscriptionFinished(sRecordingStartTime, null);
         sIsRecording = false;
         sIsProcessing = false;
         if (mTimerRunnable != null) {
@@ -480,6 +491,8 @@ public class VoiceVaultService extends Service {
 
     @Override
     public void onDestroy() {
+        mGeneration++;
+        VoiceVaultKeyService.onTranscriptionFinished(sRecordingStartTime, null);
         cleanup();
         mExecutor.shutdown();
         super.onDestroy();

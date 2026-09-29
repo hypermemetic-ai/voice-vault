@@ -6,7 +6,7 @@ Ultra-reliable, local-first asynchronous voice recorder and dictation tool for A
 
 ## Features
 
-- **0ms Headless Quick Tap Dictation**: Double-tap the back of your Pixel to start dictating without leaving your active app (e.g. Orca). Double-tap again to stop, transcribe on GPU, and copy directly to the system clipboard.
+- **0ms Headless Quick Tap Dictation**: Double-tap the back of your Pixel to start dictating without leaving your active app. Double-tap again to stop, transcribe on GPU, and copy directly to the system clipboard.
 - **Two-Part Speaker Rejection**: Pixel `VOICE_RECOGNITION` beamforming stops room audio at the source, and a server-side ONNX speaker-voiceprint gate drops any non-user speech segments before they reach Whisper.
 - **Voice Enrollment & Self-Calibration**: Record three ~5 s reference clips; the server extracts normalized 192-d/512-d CAM++ embeddings, self-calibrates an acceptance threshold (`μ − 3σ` of intra-speaker similarity) and stores the gallery in SQLite. No reference audio is ever persisted.
 - **Length-Adaptive Scoring**: Short utterances (`"yes"`, `"okay"`) are scored with a relaxed threshold so brief words are not falsely rejected, while a different voice still fails by a wide margin.
