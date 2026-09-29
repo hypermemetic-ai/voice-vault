@@ -2,15 +2,12 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/pill_root"
     android:layout_width="wrap_content"
-    android:layout_height="40dp"
-    android:minWidth="110dp"
+    android:layout_height="wrap_content"
     android:orientation="horizontal"
     android:gravity="center"
     android:paddingStart="14dp"
     android:paddingEnd="14dp"
-    android:background="@drawable/bg_floating_square"
-    android:clickable="true"
-    android:focusable="false">
+    android:background="@drawable/bg_floating_square">
 
     <View
         android:id="@+id/pill_dot"
@@ -29,6 +26,18 @@
         android:text="00:00"
         android:textColor="#FFFFFF"
         android:textSize="15sp"
+        android:fontFamily="@font/urw_gothic_demi"
+        android:letterSpacing="0.04" />
+
+    <TextView
+        android:id="@+id/pill_mode"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:singleLine="true"
+        android:text="DICT"
+        android:textColor="#FFFFFF"
+        android:textSize="11sp"
         android:fontFamily="@font/urw_gothic_demi"
         android:letterSpacing="0.04" />
 

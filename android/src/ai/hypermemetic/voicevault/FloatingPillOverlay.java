@@ -1,7 +1,6 @@
 package ai.hypermemetic.voicevault;
 
 import android.content.Context;
-import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.os.Build;
@@ -17,149 +16,170 @@ import android.widget.TextView;
 
 public class FloatingPillOverlay {
     private static final String TAG = "FloatingPillOverlay";
+    private static final String PREFS_NAME = "voice_vault_prefs";
+    private static final String PREF_DICTATION_MODE = "pref_dictation_mode_enabled";
+    private static final Handler sMainHandler = new Handler(Looper.getMainLooper());
+    private static final FloatingPillState sState = new FloatingPillState();
 
-    private static WindowManager sWindowManager = null;
-    private static View sPillView = null;
-    private static View sDot = null;
-    private static TextView sTvText = null;
-    private static Handler sMainHandler = new Handler(Looper.getMainLooper());
-    private static Runnable sDismissRunnable = null;
+    private static Context sContext;
+    private static WindowManager sWindowManager;
+    private static View sPillView;
+    private static View sDot;
+    private static TextView sTvText;
+    private static TextView sModeText;
+    private static Runnable sDismissRunnable;
+
+    /** Read the persisted preference, never a caller's possibly stale toggle value. */
+    public static void refreshMode(Context context) {
+        Context appContext = context.getApplicationContext();
+        sMainHandler.post(() -> {
+            sContext = appContext;
+            render();
+        });
+    }
 
     public static void showRecording(Context context) {
+        Context appContext = context.getApplicationContext();
         sMainHandler.post(() -> {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    if (!Settings.canDrawOverlays(context)) {
-                        Log.d(TAG, "Cannot draw overlays: permission not granted");
-                        return;
-                    }
-                }
-
-                dismissInternal();
-
-                sWindowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
-                if (sWindowManager == null) return;
-
-                LayoutInflater inflater = LayoutInflater.from(context);
-                sPillView = inflater.inflate(R.layout.overlay_floating_pill, null);
-                sDot = sPillView.findViewById(R.id.pill_dot);
-                sTvText = sPillView.findViewById(R.id.pill_text);
-
-                if (sDot != null) {
-                    sDot.setBackgroundResource(R.drawable.ic_recording_dot);
-                    sDot.setVisibility(View.VISIBLE);
-                }
-                sTvText.setText("00:00");
-                sTvText.setTextSize(15f);
-                sTvText.setTextColor(Color.WHITE);
-
-                int layoutFlag = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                        ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                        : WindowManager.LayoutParams.TYPE_PHONE;
-
-                // Position safely below Pixel camera punch-hole and status bar
-                int resourceId = context.getResources().getIdentifier("status_bar_height", "dimen", "android");
-                int statusBarHeight = (resourceId > 0)
-                        ? context.getResources().getDimensionPixelSize(resourceId)
-                        : Math.round(48 * context.getResources().getDisplayMetrics().density);
-                int yOffset = statusBarHeight + Math.round(18 * context.getResources().getDisplayMetrics().density);
-
-                int heightPx = Math.round(40 * context.getResources().getDisplayMetrics().density);
-                WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                        WindowManager.LayoutParams.WRAP_CONTENT,
-                        heightPx,
-                        layoutFlag,
-                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
-                                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN |
-                                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                        PixelFormat.TRANSLUCENT
-                );
-
-                params.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-                params.y = yOffset;
-
-                // Tap on the floating box stops recording immediately
-                sPillView.setOnClickListener(v -> {
-                    Intent stopIntent = new Intent(context, VoiceVaultService.class);
-                    stopIntent.setAction(VoiceVaultService.ACTION_STOP);
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        context.startForegroundService(stopIntent);
-                    } else {
-                        context.startService(stopIntent);
-                    }
-                });
-
-                sWindowManager.addView(sPillView, params);
-
-            } catch (Exception e) {
-                Log.e(TAG, "Error showing floating text overlay", e);
-            }
+            sContext = appContext;
+            cancelSuccessExpiry();
+            sState.recording();
+            render();
         });
     }
 
     public static void updateTimer(String timerText) {
         sMainHandler.post(() -> {
-            try {
-                if (sTvText != null && sPillView != null) {
-                    sTvText.setText(timerText);
-                }
-            } catch (Exception ignored) {}
+            sState.timer(timerText);
+            render();
         });
     }
 
     public static void showTranscribing() {
         sMainHandler.post(() -> {
-            try {
-                if (sPillView != null) {
-                    if (sDot != null) {
-                        sDot.setBackgroundResource(R.drawable.ic_transcribing_dot);
-                        sDot.setVisibility(View.VISIBLE);
-                    }
-                    if (sTvText != null) {
-                        sTvText.setText("Processing");
-                        sTvText.setTextSize(13f);
-                        sTvText.setTextColor(Color.parseColor("#E0E0E0"));
-                    }
-                }
-            } catch (Exception ignored) {}
+            cancelSuccessExpiry();
+            sState.processing();
+            render();
         });
     }
 
     public static void showSuccess(String message) {
         sMainHandler.post(() -> {
-            try {
-                if (sPillView != null) {
-                    if (sDot != null) {
-                        sDot.setBackgroundResource(R.drawable.ic_success_dot);
-                        sDot.setVisibility(View.VISIBLE);
-                    }
-                    if (sTvText != null) {
-                        sTvText.setText(message != null ? message : "Copied");
-                        sTvText.setTextSize(14f);
-                        sTvText.setTextColor(Color.parseColor("#4ADE80")); // Clean crisp green
-                    }
-
-                    if (sDismissRunnable != null) {
-                        sMainHandler.removeCallbacks(sDismissRunnable);
-                    }
-                    sDismissRunnable = FloatingPillOverlay::dismissInternal;
-                    sMainHandler.postDelayed(sDismissRunnable, 1400);
-                } else {
-                    dismissInternal();
-                }
-            } catch (Exception ignored) {}
+            cancelSuccessExpiry();
+            sState.success(message);
+            render();
+            sDismissRunnable = () -> {
+                sDismissRunnable = null;
+                sState.idle();
+                render();
+            };
+            sMainHandler.postDelayed(sDismissRunnable, 1400);
         });
     }
 
     public static void dismiss() {
-        sMainHandler.post(FloatingPillOverlay::dismissInternal);
+        sMainHandler.post(() -> {
+            cancelSuccessExpiry();
+            sState.idle();
+            render();
+        });
     }
 
-    private static void dismissInternal() {
+    private static void cancelSuccessExpiry() {
         if (sDismissRunnable != null) {
             sMainHandler.removeCallbacks(sDismissRunnable);
             sDismissRunnable = null;
         }
+    }
+
+    /** All state and view changes are serialized on the main thread. */
+    private static void render() {
+        if (sContext == null) return;
+        sState.setDictationMode(sContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(PREF_DICTATION_MODE, false));
+        if (!sState.isVisible() || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                && !Settings.canDrawOverlays(sContext))) {
+            removeWindow();
+            return;
+        }
+
+        try {
+            if (sPillView == null) {
+                sWindowManager = (WindowManager) sContext.getSystemService(Context.WINDOW_SERVICE);
+                if (sWindowManager == null) return;
+                sPillView = LayoutInflater.from(sContext).inflate(R.layout.overlay_floating_pill, null);
+                sDot = sPillView.findViewById(R.id.pill_dot);
+                sTvText = sPillView.findViewById(R.id.pill_text);
+                sModeText = sPillView.findViewById(R.id.pill_mode);
+
+                int layoutFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                        ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                        : WindowManager.LayoutParams.TYPE_PHONE;
+                int resourceId = sContext.getResources().getIdentifier("status_bar_height", "dimen", "android");
+                int statusBarHeight = resourceId > 0
+                        ? sContext.getResources().getDimensionPixelSize(resourceId)
+                        : dp(48);
+                WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        layoutFlag,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
+                                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE |
+                                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN |
+                                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                        PixelFormat.TRANSLUCENT);
+                // Android 12+ rejects pass-through touches through untrusted overlays
+                // above the maximum obscuring opacity (0.8 for one overlay).
+                params.alpha = 0.7f;
+                params.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+                params.y = statusBarHeight + dp(18);
+                updateViews();
+                sWindowManager.addView(sPillView, params);
+            } else {
+                updateViews();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error showing floating pill overlay", e);
+            removeWindow();
+        }
+    }
+
+    private static int dp(int value) {
+        return Math.round(value * sContext.getResources().getDisplayMetrics().density);
+    }
+
+    private static void updateViews() {
+        boolean idle = sState.phase() == FloatingPillState.Phase.IDLE;
+        sPillView.setMinimumWidth(idle ? 0 : dp(110));
+        sPillView.setMinimumHeight(dp(idle ? 28 : 40));
+        sDot.setVisibility(idle ? View.GONE : View.VISIBLE);
+        sTvText.setVisibility(idle ? View.GONE : View.VISIBLE);
+        sModeText.setVisibility(sState.isDictationMode() ? View.VISIBLE : View.GONE);
+        if (idle) return;
+
+        sTvText.setText(sState.text());
+        switch (sState.phase()) {
+            case RECORDING:
+                sDot.setBackgroundResource(R.drawable.ic_recording_dot);
+                sTvText.setTextSize(15f);
+                sTvText.setTextColor(Color.WHITE);
+                break;
+            case PROCESSING:
+                sDot.setBackgroundResource(R.drawable.ic_transcribing_dot);
+                sTvText.setTextSize(13f);
+                sTvText.setTextColor(Color.parseColor("#E0E0E0"));
+                break;
+            case SUCCESS:
+                sDot.setBackgroundResource(R.drawable.ic_success_dot);
+                sTvText.setTextSize(14f);
+                sTvText.setTextColor(Color.parseColor("#4ADE80"));
+                break;
+            default:
+                break;
+        }
+    }
+
+    private static void removeWindow() {
         if (sPillView != null && sWindowManager != null) {
             try {
                 sWindowManager.removeView(sPillView);
@@ -168,9 +188,10 @@ public class FloatingPillOverlay {
                     sWindowManager.removeViewImmediate(sPillView);
                 } catch (Exception ignored) {}
             }
-            sPillView = null;
-            sDot = null;
-            sTvText = null;
         }
+        sPillView = null;
+        sDot = null;
+        sTvText = null;
+        sModeText = null;
     }
 }
