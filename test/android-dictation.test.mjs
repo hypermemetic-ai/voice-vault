@@ -282,12 +282,12 @@ test("manifest declares SetupActivity and battery permission", () => {
 test("VoiceVaultKeyService supports double-press Volume Up to toggle Dictation Mode", () => {
   const source = read(KEY_SERVICE);
   assert.ok(
-    source.includes("DOUBLE_TAP_TIMEOUT_MS"),
-    "VoiceVaultKeyService must define DOUBLE_TAP_TIMEOUT_MS",
+    source.includes("VolumeUpTiming.UP_WINDOW_MS + 1"),
+    "VoiceVaultKeyService must wait until just after the inclusive Up deadline",
   );
   assert.ok(
-    source.includes("mLastVolUpInactiveTime"),
-    "VoiceVaultKeyService must track inactive Volume Up timestamp for double-tap detection",
+    source.includes("mVolUpTiming.inactivePress(now)"),
+    "VoiceVaultKeyService must track inactive Volume Up presses by uptime",
   );
   assert.ok(
     source.includes("setDictationModeEnabled(true)") && source.includes("setDictationModeEnabled(false)"),

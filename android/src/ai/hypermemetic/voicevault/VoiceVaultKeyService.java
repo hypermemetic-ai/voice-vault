@@ -54,18 +54,21 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private static final String PREF_AUTO_SEND = "pref_auto_send_on_paste";
     private static final long IME_ENTER_DELAY_MS = 60;
     private static final long FOLLOWUP_SEND_DELAY_MS = 240;
-    private static final long DOUBLE_TAP_TIMEOUT_MS = 320;
+    private static final long DOWN_WINDOW_MS = 320;
 
     private static volatile VoiceVaultKeyService sInstance = null;
 
     private final Handler mKeyHandler = new Handler(Looper.getMainLooper());
-    private long mLastVolUpInactiveTime = 0;
+    private final VolumeUpTiming mVolUpTiming = new VolumeUpTiming();
     private Runnable mPendingVolUpRunnable = null;
     private Runnable mPendingVolDnRunnable = null;
     private final PendingDictation mPendingDictation = new PendingDictation();
     private SharedPreferences mModePrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener mModeListener = (prefs, key) -> {
-        if (PREF_DICTATION_MODE.equals(key)) FloatingPillOverlay.refreshMode(this);
+        if (PREF_DICTATION_MODE.equals(key)) {
+            cancelPendingKeyCallbacks();
+            FloatingPillOverlay.refreshMode(this);
+        }
     };
 
     @Override
@@ -73,6 +76,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
         super.onServiceConnected();
         sInstance = this;
         stopWatchingMode();
+        cancelPendingKeyCallbacks();
         mModePrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         mModePrefs.registerOnSharedPreferenceChangeListener(mModeListener);
         FloatingPillOverlay.refreshMode(this);
@@ -108,6 +112,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
     private void cancelPendingKeyCallbacks() {
         mPendingDictation.cancel();
+        mVolUpTiming.reset();
         if (mPendingVolUpRunnable != null) {
             mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
             mPendingVolUpRunnable = null;
@@ -201,15 +206,13 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
                 if (event.getAction() == KeyEvent.ACTION_DOWN) {
                     long now = SystemClock.uptimeMillis();
-                    if (mLastVolUpInactiveTime != 0 && now - mLastVolUpInactiveTime <= DOUBLE_TAP_TIMEOUT_MS) {
-                        mLastVolUpInactiveTime = 0;
+                    if (mVolUpTiming.inactivePress(now)) {
                         Log.i(TAG, "Dictation Mode OFF: Vol Up double-press -> ENABLE dictation mode");
                         setDictationModeEnabled(true);
                         notifyTileStateChanged();
                         provideFeedback(true, "Dictation Mode: ON");
                         return true; // Consume second press
                     } else {
-                        mLastVolUpInactiveTime = now;
                         return super.onKeyEvent(event);
                     }
                 }
@@ -226,8 +229,9 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
             if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                if (mPendingVolUpRunnable != null) {
-                    // Double-press Volume Up while active -> DISABLE dictation mode
+                VolumeUpTiming.ActivePress press = mVolUpTiming.activePress(SystemClock.uptimeMillis());
+                if (press == VolumeUpTiming.ActivePress.DOUBLE) {
+                    // A double is valid only by uptime, not by a late queued callback.
                     mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
                     mPendingVolUpRunnable = null;
                     Log.i(TAG, "Dictation Mode ON: Vol Up double-press -> DISABLE dictation mode");
@@ -239,16 +243,28 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     notifyTileStateChanged();
                     provideFeedback(false, "Dictation Mode: OFF");
                     return true;
-                } else {
-                    // Single press debounce
-                    mPendingVolUpRunnable = () -> {
+                }
+                if (press == VolumeUpTiming.ActivePress.EXPIRED_FIRST) {
+                    // Handler may be late: honor the first single before starting a new window.
+                    mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
+                    mPendingVolUpRunnable = null;
+                    Log.i(TAG, "Dictation Mode: expired Vol Up single-press -> toggle recording");
+                    toggleDictation();
+                }
+                // Run just after the inclusive 250ms boundary, so a press at 250ms can win.
+                Runnable single = new Runnable() {
+                    @Override public void run() {
+                        if (mPendingVolUpRunnable != this) return;
                         mPendingVolUpRunnable = null;
+                        mVolUpTiming.activeSingleFinished();
+                        if (!isDictationModeEnabled()) return;
                         Log.i(TAG, "Dictation Mode: Vol Up single-press -> toggle recording");
                         toggleDictation();
-                    };
-                    mKeyHandler.postDelayed(mPendingVolUpRunnable, DOUBLE_TAP_TIMEOUT_MS);
-                    return true;
-                }
+                    }
+                };
+                mPendingVolUpRunnable = single;
+                mKeyHandler.postDelayed(single, VolumeUpTiming.UP_WINDOW_MS + 1);
+                return true;
             } else if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
                 if (mPendingVolDnRunnable != null) {
                     // Double-press Volume Down while active -> TOGGLE auto-send
@@ -266,7 +282,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                         Log.i(TAG, "Dictation Mode: Vol Dn single-press -> finish and insert");
                         finishAndInsert();
                     };
-                    mKeyHandler.postDelayed(mPendingVolDnRunnable, DOUBLE_TAP_TIMEOUT_MS);
+                    mKeyHandler.postDelayed(mPendingVolDnRunnable, DOWN_WINDOW_MS);
                     return true;
                 }
             }
