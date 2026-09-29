@@ -729,6 +729,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (mCheckboxAutoSend != null) {
+            SharedPreferences prefs = getSharedPreferences("voice_vault_prefs", MODE_PRIVATE);
+            mCheckboxAutoSend.setChecked(prefs.getBoolean("pref_auto_send_on_paste", true));
+        }
         syncWithServiceState();
         FloatingPillOverlay.refreshMode(this);
         refreshSetupBanner();

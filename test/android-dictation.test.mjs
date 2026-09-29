@@ -189,8 +189,8 @@ test("VoiceVaultKeyService implements auto-focus, 0ms block insert, and send but
     "auto-send must dispatch ACTION_IME_ENTER with delay",
   );
   assert.ok(
-    source.includes("CODEX_EXEC_DELAY_MS") && source.includes("stage2"),
-    "auto-send must provide Stage 2 follow-up dispatch for Codex/terminal execution",
+    source.includes("FOLLOWUP_SEND_DELAY_MS") && source.includes("stage2"),
+    "auto-send must retain the Stage 2 follow-up dispatch",
   );
   assert.ok(
     source.includes("recycle()"),
@@ -276,5 +276,43 @@ test("manifest declares SetupActivity and battery permission", () => {
   assert.ok(
     manifest.includes("android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"),
     "manifest must request REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+  );
+});
+
+test("VoiceVaultKeyService supports double-press Volume Up to toggle Dictation Mode", () => {
+  const source = read(KEY_SERVICE);
+  assert.ok(
+    source.includes("DOUBLE_TAP_TIMEOUT_MS"),
+    "VoiceVaultKeyService must define DOUBLE_TAP_TIMEOUT_MS",
+  );
+  assert.ok(
+    source.includes("mLastVolUpInactiveTime"),
+    "VoiceVaultKeyService must track inactive Volume Up timestamp for double-tap detection",
+  );
+  assert.ok(
+    source.includes("setDictationModeEnabled(true)") && source.includes("setDictationModeEnabled(false)"),
+    "VoiceVaultKeyService must toggle dictation mode on double-press Volume Up",
+  );
+  assert.ok(
+    source.includes("notifyTileStateChanged") && source.includes("requestListeningState"),
+    "VoiceVaultKeyService must request Quick Settings tile refresh on dictation toggle",
+  );
+});
+
+test("VoiceVaultKeyService supports double-press Volume Down to toggle auto-send on paste", () => {
+  const source = read(KEY_SERVICE);
+  assert.ok(
+    source.includes("mPendingVolDnRunnable"),
+    "VoiceVaultKeyService must debounce single Volume Down press",
+  );
+  assert.ok(
+    source.includes("setAutoSendEnabled(!isAutoSendEnabled())") ||
+      source.includes("boolean newAutoSend = !isAutoSendEnabled()") ||
+      source.includes("setAutoSendEnabled(newAutoSend)"),
+    "VoiceVaultKeyService must toggle auto-send preference on double-press Volume Down",
+  );
+  assert.ok(
+    source.includes("provideFeedback"),
+    "VoiceVaultKeyService must provide user feedback on toggle",
   );
 });

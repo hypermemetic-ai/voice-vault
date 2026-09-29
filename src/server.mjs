@@ -458,8 +458,14 @@ export function createAppServer(options = {}) {
           audioUrl: `/api/audio/${id}`,
           backend: transcribeResult.backend,
           backendAttempts: transcribeResult.backendAttempts,
+          rescue: transcribeResult.rescue ?? null,
           gate: transcribeResult.gate,
         });
+        if (transcribeResult.rescue) {
+          console.log(
+            `[${new Date().toISOString()}] LF rescue (highpass ${transcribeResult.rescue.hz}Hz) recovered speech for ${id}`,
+          );
+        }
         return;
       }
 

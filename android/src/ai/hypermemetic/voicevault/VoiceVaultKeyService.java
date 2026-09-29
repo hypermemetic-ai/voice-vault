@@ -3,6 +3,7 @@ package ai.hypermemetic.voicevault;
 import android.accessibilityservice.AccessibilityService;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -10,6 +11,10 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.service.quicksettings.TileService;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
@@ -19,23 +24,28 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Hardware volume-key controller for Dictation Mode (toggled via the Quick
- * Settings tile, stored in {@code pref_dictation_mode_enabled}).
+ * Hardware volume-key controller for Dictation Mode.
  *
  * <ul>
- *   <li>Dictation Mode OFF: volume keys pass through to the system normally.</li>
+ *   <li>Dictation Mode OFF:
+ *     <ul>
+ *       <li>Single Volume Up & Down: pass through to the system normally.</li>
+ *       <li>Double-press Volume Up: enables Dictation Mode (replaces tapping the tile).</li>
+ *     </ul>
+ *   </li>
  *   <li>Dictation Mode ON:
  *     <ul>
- *       <li>Volume Up: toggles recording (start/stop + Whisper transcription).</li>
- *       <li>Volume Down: pastes the clipboard into the focused editable field,
- *           optionally auto-sending with IME Enter and clicking the Send button.</li>
+ *       <li>Single Volume Up: toggles recording (start/stop + Whisper transcription).</li>
+ *       <li>Double-press Volume Up: disables Dictation Mode.</li>
+ *       <li>Single Volume Down: stops/waits for transcription, then inserts (and auto-sends if enabled).</li>
+ *       <li>Double-press Volume Down: toggles auto-send on paste (pref_auto_send_on_paste).</li>
  *     </ul>
  *     Both keys are consumed so the system volume never changes.
  *   </li>
  * </ul>
  *
  * Also provides accessibility capabilities to auto-dismiss the SystemUI
- * clipboard overlay so it doesn't block bottom-left UI buttons (e.g. in Orca).
+ * clipboard overlay so it doesn't block bottom-left UI buttons.
  */
 public class VoiceVaultKeyService extends AccessibilityService {
     private static final String TAG = "VoiceVaultKey";
@@ -43,9 +53,16 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private static final String PREF_DICTATION_MODE = "pref_dictation_mode_enabled";
     private static final String PREF_AUTO_SEND = "pref_auto_send_on_paste";
     private static final long IME_ENTER_DELAY_MS = 60;
-    private static final long CODEX_EXEC_DELAY_MS = 240;
+    private static final long FOLLOWUP_SEND_DELAY_MS = 240;
+    private static final long DOUBLE_TAP_TIMEOUT_MS = 320;
 
     private static volatile VoiceVaultKeyService sInstance = null;
+
+    private final Handler mKeyHandler = new Handler(Looper.getMainLooper());
+    private long mLastVolUpInactiveTime = 0;
+    private Runnable mPendingVolUpRunnable = null;
+    private Runnable mPendingVolDnRunnable = null;
+    private final PendingDictation mPendingDictation = new PendingDictation();
     private SharedPreferences mModePrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener mModeListener = (prefs, key) -> {
         if (PREF_DICTATION_MODE.equals(key)) FloatingPillOverlay.refreshMode(this);
@@ -64,19 +81,21 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
     @Override
     public boolean onUnbind(Intent intent) {
-        stopWatchingMode();
         if (sInstance == this) {
             sInstance = null;
         }
+        stopWatchingMode();
+        cancelPendingKeyCallbacks();
         return super.onUnbind(intent);
     }
 
     @Override
     public void onDestroy() {
-        stopWatchingMode();
         if (sInstance == this) {
             sInstance = null;
         }
+        stopWatchingMode();
+        cancelPendingKeyCallbacks();
         super.onDestroy();
     }
 
@@ -84,6 +103,18 @@ public class VoiceVaultKeyService extends AccessibilityService {
         if (mModePrefs != null) {
             mModePrefs.unregisterOnSharedPreferenceChangeListener(mModeListener);
             mModePrefs = null;
+        }
+    }
+
+    private void cancelPendingKeyCallbacks() {
+        mPendingDictation.cancel();
+        if (mPendingVolUpRunnable != null) {
+            mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
+            mPendingVolUpRunnable = null;
+        }
+        if (mPendingVolDnRunnable != null) {
+            mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
+            mPendingVolDnRunnable = null;
         }
     }
 
@@ -154,22 +185,235 @@ public class VoiceVaultKeyService extends AccessibilityService {
         int keyCode = event.getKeyCode();
         boolean isVolumeKey = keyCode == KeyEvent.KEYCODE_VOLUME_UP
                 || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN;
-        if (!isVolumeKey || !isDictationModeEnabled()) {
+        if (!isVolumeKey) {
             return super.onKeyEvent(event);
         }
 
-        // Dictation Mode is ON: consume volume keys so the system volume
-        // never changes, and act on the press (ACTION_DOWN only).
+        boolean dictationActive = isDictationModeEnabled();
+        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() > 0) {
+            return dictationActive || super.onKeyEvent(event);
+        }
+
+        // 1. When Dictation Mode is OFF:
+        // Double-pressing Volume Up toggles Dictation Mode ON (replaces tapping the tile).
+        // Single Volume Up and all Volume Down presses pass through to the system.
+        if (!dictationActive) {
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+                if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                    long now = SystemClock.uptimeMillis();
+                    if (mLastVolUpInactiveTime != 0 && now - mLastVolUpInactiveTime <= DOUBLE_TAP_TIMEOUT_MS) {
+                        mLastVolUpInactiveTime = 0;
+                        Log.i(TAG, "Dictation Mode OFF: Vol Up double-press -> ENABLE dictation mode");
+                        setDictationModeEnabled(true);
+                        notifyTileStateChanged();
+                        provideFeedback(true, "Dictation Mode: ON");
+                        return true; // Consume second press
+                    } else {
+                        mLastVolUpInactiveTime = now;
+                        return super.onKeyEvent(event);
+                    }
+                }
+                return super.onKeyEvent(event);
+            }
+            return super.onKeyEvent(event);
+        }
+
+        // 2. When Dictation Mode is ON:
+        // Intercept volume keys so system volume never changes.
+        if (event.getAction() == KeyEvent.ACTION_UP) {
+            return true;
+        }
+
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
             if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                Log.i(TAG, "Dictation Mode: Vol Up -> toggle recording");
-                toggleDictation();
-            } else {
-                Log.i(TAG, "Dictation Mode: Vol Dn -> paste transcript");
-                pasteIntoFocusedField();
+                if (mPendingVolUpRunnable != null) {
+                    // Double-press Volume Up while active -> DISABLE dictation mode
+                    mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
+                    mPendingVolUpRunnable = null;
+                    Log.i(TAG, "Dictation Mode ON: Vol Up double-press -> DISABLE dictation mode");
+                    if (VoiceVaultService.isRecording()) {
+                        stopRecordingService();
+                    }
+                    setDictationModeEnabled(false);
+                    cancelPendingKeyCallbacks();
+                    notifyTileStateChanged();
+                    provideFeedback(false, "Dictation Mode: OFF");
+                    return true;
+                } else {
+                    // Single press debounce
+                    mPendingVolUpRunnable = () -> {
+                        mPendingVolUpRunnable = null;
+                        Log.i(TAG, "Dictation Mode: Vol Up single-press -> toggle recording");
+                        toggleDictation();
+                    };
+                    mKeyHandler.postDelayed(mPendingVolUpRunnable, DOUBLE_TAP_TIMEOUT_MS);
+                    return true;
+                }
+            } else if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                if (mPendingVolDnRunnable != null) {
+                    // Double-press Volume Down while active -> TOGGLE auto-send
+                    mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
+                    mPendingVolDnRunnable = null;
+                    boolean newAutoSend = !isAutoSendEnabled();
+                    setAutoSendEnabled(newAutoSend);
+                    Log.i(TAG, "Dictation Mode ON: Vol Dn double-press -> auto-send " + (newAutoSend ? "ENABLED" : "DISABLED"));
+                    provideFeedback(newAutoSend, "Auto-send: " + (newAutoSend ? "ON" : "OFF"));
+                    return true;
+                } else {
+                    // Single press debounce
+                    mPendingVolDnRunnable = () -> {
+                        mPendingVolDnRunnable = null;
+                        Log.i(TAG, "Dictation Mode: Vol Dn single-press -> finish and insert");
+                        finishAndInsert();
+                    };
+                    mKeyHandler.postDelayed(mPendingVolDnRunnable, DOUBLE_TAP_TIMEOUT_MS);
+                    return true;
+                }
             }
         }
+
         return true;
+    }
+
+    private void stopRecordingService() {
+        try {
+            Intent intent = new Intent(this, VoiceVaultService.class);
+            intent.setAction(VoiceVaultService.ACTION_STOP);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent);
+            } else {
+                startService(intent);
+            }
+        } catch (Throwable t) {
+            mPendingDictation.cancel();
+            Log.w(TAG, "Failed to stop recording service", t);
+        }
+    }
+
+    private void setDictationModeEnabled(boolean enabled) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit().putBoolean(PREF_DICTATION_MODE, enabled).apply();
+    }
+
+    private void setAutoSendEnabled(boolean enabled) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit().putBoolean(PREF_AUTO_SEND, enabled).apply();
+    }
+
+    private void notifyTileStateChanged() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                TileService.requestListeningState(
+                        this,
+                        new ComponentName(this, VoiceVaultTileService.class)
+                );
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to request tile listening state", t);
+            }
+        }
+    }
+
+    private void provideFeedback(boolean positive, String message) {
+        FloatingPillOverlay.showFeedback(this, message, positive);
+
+        try {
+            if (positive) {
+                SoundEffects.playStartPop();
+            } else {
+                SoundEffects.playSuccessChime();
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+            if (vibrator != null && vibrator.hasVibrator()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    if (positive) {
+                        long[] timings = new long[]{0, 35, 45, 45};
+                        int[] amplitudes = new int[]{0, 180, 0, 255};
+                        vibrator.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1));
+                    } else {
+                        vibrator.vibrate(VibrationEffect.createOneShot(65, VibrationEffect.DEFAULT_AMPLITUDE));
+                    }
+                } else {
+                    vibrator.vibrate(positive ? 90 : 50);
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    /** Called on the main thread after the exact recording result is saved/copied. */
+    public static void onTranscriptionFinished(long recordingId, String text) {
+        VoiceVaultKeyService service = sInstance;
+        if (service == null) return;
+        service.mKeyHandler.post(() -> service.insertCompletedRecording(recordingId, text));
+    }
+
+    private void finishAndInsert() {
+        if (!isDictationModeEnabled()) return;
+        if (!VoiceVaultService.isRecording() && !VoiceVaultService.isProcessing()) {
+            if (mPendingDictation.isPending()) return;
+            pasteIntoFocusedField();
+            return;
+        }
+        AccessibilityNodeInfo root = getApplicationRoot();
+        try {
+            mPendingDictation.cancel();
+            if (root != null && root.getPackageName() != null) {
+                mPendingDictation.begin(VoiceVaultService.getRecordingStartTime(),
+                        root.getPackageName().toString(), root.getWindowId());
+            }
+        } finally {
+            if (root != null) root.recycle();
+        }
+        if (VoiceVaultService.isRecording()) stopRecordingService();
+    }
+
+    private void insertCompletedRecording(long recordingId, String text) {
+        if (!isDictationModeEnabled()) {
+            mPendingDictation.cancel();
+            return;
+        }
+        AccessibilityNodeInfo root = getApplicationRoot();
+        try {
+            String packageName = root == null || root.getPackageName() == null
+                    ? null : root.getPackageName().toString();
+            int windowId = root == null ? -1 : root.getWindowId();
+            String result = mPendingDictation.complete(recordingId, text, packageName, windowId);
+            if (result != null) pasteIntoFocusedField(result);
+        } finally {
+            if (root != null) root.recycle();
+        }
+    }
+
+    /** An IME can hold the active window while the focused application owns the editor. */
+    private AccessibilityNodeInfo getApplicationRoot() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        List<AccessibilityWindowInfo> windows = getWindows();
+        if (windows == null) return root;
+        try {
+            boolean imeActive = false;
+            for (AccessibilityWindowInfo window : windows) {
+                if (root != null && window.getId() == root.getWindowId()
+                        && window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    imeActive = true;
+                }
+            }
+            if (root == null || imeActive) {
+                for (AccessibilityWindowInfo window : windows) {
+                    if (window.getType() == AccessibilityWindowInfo.TYPE_APPLICATION && window.isFocused()) {
+                        AccessibilityNodeInfo candidate = window.getRoot();
+                        if (candidate != null) {
+                            if (root != null) root.recycle();
+                            return candidate;
+                        }
+                    }
+                }
+            }
+            return root;
+        } finally {
+            for (AccessibilityWindowInfo window : windows) window.recycle();
+        }
     }
 
     private boolean isDictationModeEnabled() {
@@ -178,6 +422,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
     }
 
     private void toggleDictation() {
+        mPendingDictation.cancel();
         Intent intent = new Intent(this, VoiceVaultService.class);
         if (VoiceVaultService.isRecording()) {
             intent.setAction(VoiceVaultService.ACTION_STOP);
@@ -199,10 +444,14 @@ public class VoiceVaultKeyService extends AccessibilityService {
      * Auto-sends via ACTION_IME_ENTER and findAndClickSendButton when enabled.
      */
     private void pasteIntoFocusedField() {
+        pasteIntoFocusedField(null);
+    }
+
+    private void pasteIntoFocusedField(String completedTranscript) {
         AccessibilityNodeInfo target = null;
         AccessibilityNodeInfo root = null;
         try {
-            root = getRootInActiveWindow();
+            root = getApplicationRoot();
             if (root == null) {
                 Log.i(TAG, "Paste: no active window root");
                 return;
@@ -228,44 +477,12 @@ public class VoiceVaultKeyService extends AccessibilityService {
             }
             if (target == null) {
                 Log.i(TAG, "Paste: no focused editable field");
+                FloatingPillOverlay.showFeedback(this, "Copied — open composer, then Vol Down", false);
                 return;
             }
             Log.i(TAG, "Paste: found target node: " + target.getClassName() + " / id=" + target.getViewIdResourceName() + " / editable=" + target.isEditable() + " / focused=" + target.isFocused());
 
-            CharSequence clipText = null;
-            try {
-                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                if (cm != null && cm.hasPrimaryClip()) {
-                    ClipData clip = cm.getPrimaryClip();
-                    if (clip != null && clip.getItemCount() > 0) {
-                        clipText = clip.getItemAt(0).getText();
-                        if (clipText == null) {
-                            clipText = clip.getItemAt(0).coerceToText(this);
-                        }
-                    }
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "Paste: failed to read clipboard", t);
-            }
-
-            if (clipText == null || clipText.length() == 0) {
-                String last = VoiceVaultService.getLastTranscript();
-                if (last != null && !last.trim().isEmpty()) {
-                    clipText = last;
-                }
-            }
-
-            if (clipText == null || clipText.length() == 0) {
-                try {
-                    List<HistoryManager.Entry> history = HistoryManager.loadLocalCache(this);
-                    if (history != null && !history.isEmpty()) {
-                        String histText = history.get(0).transcript;
-                        if (histText != null && !histText.trim().isEmpty()) {
-                            clipText = histText.trim();
-                        }
-                    }
-                } catch (Throwable ignored) {}
-            }
+            CharSequence clipText = readPasteText(completedTranscript);
 
             boolean pasted = false;
             if (clipText != null && clipText.length() > 0) {
@@ -310,9 +527,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     }
                 }, IME_ENTER_DELAY_MS);
 
-                // Stage 2: Follow-up auto-send for Codex in Orca and terminal buffers.
-                // In Codex in Orca, the first send transfers composer text into the terminal buffer;
-                // a follow-up send is required to execute the prompt in the terminal.
+                // Follow-up for editors that first accept an IME action without submitting.
                 new Handler(Looper.getMainLooper()).postDelayed(() -> {
                     AccessibilityNodeInfo stage2Root = null;
                     try {
@@ -340,7 +555,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                             stage2Root.recycle();
                         }
                     }
-                }, CODEX_EXEC_DELAY_MS);
+                }, FOLLOWUP_SEND_DELAY_MS);
             }
 
             autoDismissClipboardOverlay();
@@ -350,6 +565,47 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (target != null) target.recycle();
             if (root != null) root.recycle();
         }
+    }
+
+
+    private CharSequence readPasteText(String completedTranscript) {
+        CharSequence clipText = completedTranscript;
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipText == null && cm != null && cm.hasPrimaryClip()) {
+                ClipData clip = cm.getPrimaryClip();
+                if (clip != null && clip.getItemCount() > 0) {
+                    clipText = clip.getItemAt(0).getText();
+                    if (clipText == null) {
+                        clipText = clip.getItemAt(0).coerceToText(this);
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Paste: failed to read clipboard", t);
+        }
+
+        if (clipText == null || clipText.length() == 0) {
+            String last = VoiceVaultService.getLastTranscript();
+            if (last != null && !last.trim().isEmpty()) {
+                clipText = last;
+            }
+        }
+
+        if (clipText == null || clipText.length() == 0) {
+            try {
+                List<HistoryManager.Entry> history = HistoryManager.loadLocalCache(this);
+                if (history != null && !history.isEmpty()) {
+                    String histText = history.get(0).transcript;
+                    if (histText != null && !histText.trim().isEmpty()) {
+                        clipText = histText.trim();
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+
+
+        return clipText;
     }
 
     private boolean isAutoSendEnabled() {
@@ -383,7 +639,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
     /**
      * Depth-first search for an editable node in the active window hierarchy.
      * Used when neither findFocus(FOCUS_INPUT) nor findFocusedEditable finds a focused field
-     * (e.g. in Orca composer or hybrid web chat before manual tap).
+     * (e.g. in a hybrid web chat before manual tap).
      */
     private AccessibilityNodeInfo findEditableNode(AccessibilityNodeInfo node) {
         if (node == null) return null;
@@ -500,8 +756,15 @@ public class VoiceVaultKeyService extends AccessibilityService {
     }
 
     @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {}
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (event.getEventType() != AccessibilityEvent.TYPE_VIEW_CLICKED) return;
+        String packageName = event.getPackageName() == null ? null : event.getPackageName().toString();
+        // SystemUI clipboard dismissal is unrelated to the destination conversation.
+        if (mPendingDictation.matchesWindow(packageName, event.getWindowId())) {
+            mPendingDictation.cancel();
+        }
+    }
 
     @Override
-    public void onInterrupt() {}
+    public void onInterrupt() { cancelPendingKeyCallbacks(); }
 }

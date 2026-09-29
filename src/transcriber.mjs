@@ -24,6 +24,16 @@ export const WHISPER_SOCKET_TIMEOUT_MS = 15_000;
 export const HANDY_TIMEOUT_MS = 600_000;
 
 /**
+ * High-pass cutoff (Hz) used to rescue recordings whose speech the whole-file
+ * VAD misread as silence. A loud low-frequency component (handling noise, wind,
+ * or microphone occlusion) dominates the broadband RMS that VAD measures and
+ * inflates its noise floor, hiding real speech above it. The rescue is applied
+ * ONLY after the ordinary filter rejects a clip, so audio that already
+ * transcribes is never altered.
+ */
+export const VAD_LF_RESCUE_HIGHPASS_HZ = 150;
+
+/**
  * Device registry indices reported by `handy --list-devices` on this host:
  *   0 = AMD Radeon 780M (integrated), 1 = NVIDIA RTX A2000, 2 = CPU.
  * Overridable per host so the cascade is not hard-wired to one machine.
@@ -55,6 +65,13 @@ function socketPath() {
 
 function handyBin() {
   return envString("HANDY_BIN", DEFAULT_HANDY_BIN);
+}
+
+export function resolveDisplay(suppliedDisplay = process.env.DISPLAY) {
+  if (typeof suppliedDisplay === "string" && suppliedDisplay.trim()) {
+    return suppliedDisplay.trim();
+  }
+  return fs.existsSync("/tmp/.X11-unix/X99") ? ":99" : ":0";
 }
 
 /**
@@ -121,16 +138,15 @@ export function cleanTranscript(text) {
 /**
  * Convert an input audio file (webm, m4a, mp4, ogg, wav) to a 16kHz mono WAV file.
  */
-export function convertToWav(inputPath, outputPath) {
+export function convertToWav(inputPath, outputPath, options = {}) {
   return new Promise((resolve, reject) => {
-    const ff = spawn("ffmpeg", [
-      "-y",
-      "-i", inputPath,
-      "-ar", "16000",
-      "-ac", "1",
-      "-c:a", "pcm_s16le",
-      outputPath
-    ]);
+    const args = ["-y", "-i", inputPath];
+    const highpassHz = Math.round(Number(options.highpassHz));
+    if (Number.isFinite(highpassHz) && highpassHz > 0) {
+      args.push("-af", `highpass=f=${highpassHz}`);
+    }
+    args.push("-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", outputPath);
+    const ff = spawn("ffmpeg", args);
 
     let stderr = "";
     ff.stderr.on("data", (chunk) => {
@@ -255,19 +271,24 @@ export function queryHandyDirect(wavPath, options = {}) {
 
   return new Promise((resolve, reject) => {
     const start = Date.now();
+    const childEnv = {
+      ...process.env,
+      DISPLAY: resolveDisplay(options.env?.DISPLAY ?? process.env.DISPLAY),
+      GDK_BACKEND: process.env.GDK_BACKEND || "x11",
+      MESA_VK_DEVICE_SELECT: process.env.MESA_VK_DEVICE_SELECT || "1002:1900",
+      ...(options.env || {}),
+    };
+    if (!options.env?.VK_DRIVER_FILES && childEnv.VK_DRIVER_FILES === "/usr/share/vulkan/icd.d/nvidia_icd.json") {
+      delete childEnv.VK_DRIVER_FILES;
+    }
+
     const child = spawn(bin, [
       "--transcribe-file", wavPath,
       "--model", "turbo",
       "--device-index", String(deviceIndex),
       "--json"
     ], {
-      env: {
-        ...process.env,
-        DISPLAY: process.env.DISPLAY || ":0",
-        GDK_BACKEND: process.env.GDK_BACKEND || "x11",
-        MESA_VK_DEVICE_SELECT: process.env.MESA_VK_DEVICE_SELECT || "1002:1900",
-        ...(options.env || {}),
-      }
+      env: childEnv
     });
 
     let stdout = "";
@@ -359,6 +380,25 @@ export async function defaultTranscribe(wavPath, reqId, options = {}) {
 }
 
 /**
+ * Retry the whole-file VAD on a high-passed copy of a clip the ordinary filter
+ * rejected. Rejects when speech is still absent, so this only ever rescues
+ * audio that a loud low-frequency component hid from the broadband noise floor.
+ *
+ * @returns {Promise<{prepared: object}|null>}
+ */
+async function tryLowFrequencyRescue(rawWavPath, rescueWavPath) {
+  try {
+    await convertToWav(rawWavPath, rescueWavPath, { highpassHz: VAD_LF_RESCUE_HIGHPASS_HZ });
+    if (!fs.existsSync(rescueWavPath)) return null;
+    const prepared = prepareAudioForTranscription(fs.readFileSync(rescueWavPath));
+    if (prepared.hasSpeech === false || prepared.wavBytes.length <= 44) return null;
+    return { prepared };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Full end-to-end transcription of an audio file path.
  *
  * When a voiceprint is enrolled, each VAD speech segment is verified against
@@ -378,6 +418,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "voice-vault-"));
   const rawWavPath = path.join(tmpDir, "converted.wav");
   const filteredWavPath = path.join(tmpDir, "filtered.wav");
+  const rescueWavPath = path.join(tmpDir, "rescue-highpass.wav");
   const gateRequested =
     options.speakerGate ?? process.env.VOICE_VAULT_SPEAKER_GATE !== "off";
 
@@ -389,18 +430,28 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
 
     // 2. Anti-Hallucination Layer 1: VAD Silence Filter
     const wavBytes = fs.readFileSync(rawWavPath);
-    const prepared = prepareAudioForTranscription(wavBytes);
+    let prepared = prepareAudioForTranscription(wavBytes);
+    let rescue = null;
 
     if (prepared.hasSpeech === false || prepared.wavBytes.length <= 44) {
-      return {
-        ok: true,
-        text: "",
-        hasSpeech: false,
-        durationMs: 0,
-        transcribeMs: Date.now() - startTime,
-        backend: "vad_silence_filter",
-        gate: { enabled: false, reason: "no_speech" }
-      };
+      // The whole-file VAD measures broadband RMS, so a loud low-frequency
+      // component can raise its noise floor above real speech. Retry on a
+      // high-passed copy; only keep it when speech is recovered.
+      const rescued = await tryLowFrequencyRescue(rawWavPath, rescueWavPath);
+      if (!rescued) {
+        return {
+          ok: true,
+          text: "",
+          hasSpeech: false,
+          durationMs: 0,
+          transcribeMs: Date.now() - startTime,
+          backend: "vad_silence_filter",
+          rescue: null,
+          gate: { enabled: false, reason: "no_speech" }
+        };
+      }
+      prepared = rescued.prepared;
+      rescue = { type: "highpass", hz: VAD_LF_RESCUE_HIGHPASS_HZ };
     }
 
     const inputDurationMs = Math.round((prepared.wavBytes.length - 44) / 32);
@@ -461,6 +512,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
                 durationMs: inputDurationMs,
                 transcribeMs: Date.now() - startTime,
                 backend: "speaker_gate_rejected",
+                rescue,
                 gate: summarizeGate(gate),
               };
             }
@@ -490,6 +542,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
       transcribeMs: resp?.transcribe_ms || (Date.now() - startTime),
       backend: resp?.backend || "daemon_gpu",
       backendAttempts: resp?.attempts,
+      rescue,
       gate: summarizeGate(gate),
     };
   } finally {

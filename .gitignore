@@ -16,6 +16,10 @@ models/*.onnx
 # changed (INSTALL_FAILED_UPDATE_INCOMPATIBLE), so the release keystore
 # must travel with the repository. Do not re-add it here or regenerate it.
 
+# Local workflow/index metadata (not application source)
+.architect/
+.zvec-grep/
+
 # OS & Temp
 .DS_Store
 Thumbs.db
