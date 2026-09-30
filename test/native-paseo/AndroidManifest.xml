@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="sh.paseo.debug">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+    <!-- Deliberately no INTERNET, microphone, recording service or external chat. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <application android:label="Local Paseo composer fixture" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name="ai.hypermemetic.voicevault.PaseoFixtureActivity" android:exported="true" android:windowSoftInputMode="adjustResize" />
+        <service android:name="ai.hypermemetic.voicevault.VoiceVaultKeyService" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_service_config" />
+        </service>
+    </application>
+    <instrumentation android:name="ai.hypermemetic.voicevault.PaseoFixtureTest" android:targetPackage="sh.paseo.debug" />
+</manifest>

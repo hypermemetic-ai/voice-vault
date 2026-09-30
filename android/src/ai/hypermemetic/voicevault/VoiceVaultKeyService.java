@@ -70,6 +70,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private int mPaseoGeneration = 0;
     private AccessibilityNodeInfo mFlowComposer;
     private PaseoSelection.Gate mFlowGate;
+    private String mFlowExpected;
     private int mFlowWindow = -1;
     private SharedPreferences mModePrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener mModeListener = (prefs, key) -> {
@@ -441,15 +442,12 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 }
             }
             String result = mPendingDictation.complete(recordingId, text, packageName, windowId);
-            boolean wasPaseo = recordingId == mPendingPaseoId;
-            if (wasPaseo) mPendingPaseoId = -1;
+            if (recordingId == mPendingPaseoId) mPendingPaseoId = -1;
             clearPendingComposer();
-            if (result != null) {
-                if (sameComposer) pasteIntoFocusedField(result);
-                else FloatingPillOverlay.showFeedback(this, "Copied — composer changed", false);
-            } else if (wasPaseo && text != null && !text.trim().isEmpty()) {
-                FloatingPillOverlay.showFeedback(this, "Copied — destination changed", false);
-            }
+            // A manual reset/navigation can remount Paseo's input while transcription
+            // is pending. Keep the copied result, but don't insert or report a failure
+            // after the user's action. Identity is never transferred to the new input.
+            if (result != null && sameComposer) pasteIntoFocusedField(result);
         } finally {
             if (root != null) root.recycle();
         }
@@ -660,6 +658,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private void clearFlowComposer() {
         if (mFlowGate != null) mFlowGate.cancel();
         mFlowGate = null;
+        mFlowExpected = null;
         if (mFlowComposer != null) mFlowComposer.recycle();
         mFlowComposer = null;
         mFlowWindow = -1;
@@ -717,6 +716,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (editor == null) { paseoFeedback("Copied — composer unavailable"); return; }
             mFlowComposer = AccessibilityNodeInfo.obtain((AccessibilityNodeInfo) editor.handle);
             mFlowGate = new PaseoSelection.Gate();
+            mFlowExpected = expected;
             mFlowWindow = window;
             AccessibilityNodeInfo input = (AccessibilityNodeInfo) editor.handle;
             if (!input.isFocused() && !input.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) {
@@ -739,15 +739,15 @@ public class VoiceVaultKeyService extends AccessibilityService {
         if (generation != mPaseoGeneration) return;
         AccessibilityNodeInfo root = getApplicationRoot();
         try {
-            if (!validPaseo(generation, pkg, window, root)) { paseoFeedback("Copied — destination changed"); return; }
+            if (!validPaseo(generation, pkg, window, root)) { cancelPaseoFlow(); return; }
             try (PaseoTree tree = new PaseoTree(root)) {
                 PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
-                if (editor == null || !mFlowComposer.equals(editor.handle)) {
-                    paseoFeedback("Copied — composer changed"); return;
+                if (editor == null || mFlowComposer == null || !mFlowComposer.equals(editor.handle)) {
+                    cancelPaseoFlow(); return;
                 }
                 Bundle args = new Bundle();
                 args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, expected);
-                if (!mFlowGate.write() || !((AccessibilityNodeInfo) editor.handle).performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                if (!mFlowGate.write(editor.text) || !((AccessibilityNodeInfo) editor.handle).performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
                     paseoFeedback("Copied — insertion unavailable"); return;
                 }
             }
@@ -763,17 +763,19 @@ public class VoiceVaultKeyService extends AccessibilityService {
         AccessibilityNodeInfo root = getApplicationRoot();
         boolean retry = false;
         try {
-            if (!validPaseo(generation, pkg, window, root)) { paseoFeedback("Copied — destination changed"); clearFlowComposer(); return; }
+            if (!validPaseo(generation, pkg, window, root)) { cancelPaseoFlow(); return; }
             try (PaseoTree tree = new PaseoTree(root)) {
                 PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
-                if (editor == null || !mFlowComposer.equals(editor.handle)) {
-                    paseoFeedback("Copied — composer changed"); return;
+                if (editor == null || mFlowComposer == null || !mFlowComposer.equals(editor.handle)) {
+                    cancelPaseoFlow(); return;
                 }
                 PaseoSelection.Status state = mFlowGate.check(tree.root, editor, expected,
                         isAutoSendEnabled(), attempt);
                 if (state == PaseoSelection.Status.ABORT) {
-                    paseoFeedback("Copied — draft changed or send unavailable"); clearFlowComposer(); return;
+                    cancelPaseoFlow(); return;
                 }
+                String feedback = PaseoSelection.feedback(state);
+                if (feedback != null) { paseoFeedback(feedback); return; }
                 if (state == PaseoSelection.Status.INSERTED) {
                     clearFlowComposer(); return;
                 }
@@ -781,21 +783,51 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 else {
                     PaseoSelection.Node button = PaseoSelection.submit(tree.root, editor);
                     // Consume before dispatch; action return or later UI state must never trigger a retry.
-                    if (!mFlowGate.dispatch()) { paseoFeedback("Copied — send manually"); return; }
+                    if (!mFlowGate.dispatch()) { cancelPaseoFlow(); return; }
                     mPaseoGeneration++;
                     clearFlowComposer();
                     boolean accepted = ((AccessibilityNodeInfo) button.handle).performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                    if (!accepted) paseoFeedback("Draft ready — send manually");
+                    if (!accepted) paseoFeedback("Inserted — send manually");
                     return;
                 }
             }
         } catch (Throwable t) {
-            Log.w(TAG, "Paseo readiness failed", t); paseoFeedback("Copied — send manually"); return;
+            Log.w(TAG, "Paseo readiness failed", t);
+            paseoFeedback(PaseoSelection.feedback(mFlowGate != null && mFlowGate.hasEcho()
+                    ? PaseoSelection.Status.MANUAL : PaseoSelection.Status.UNCONFIRMED));
+            return;
         } finally { if (root != null) root.recycle(); }
         if (retry) {
             mKeyHandler.postDelayed(() -> checkPaseo(generation, pkg, window, expected,
                     attempt + 1), 100);
         }
+    }
+
+    private void cancelPaseoFlow() {
+        mPaseoGeneration++;
+        clearFlowComposer();
+    }
+
+    /** Observe fresh native identity/text, not a stale event payload or path/bounds. */
+    private void observePaseoFlow() {
+        AccessibilityNodeInfo root = getApplicationRoot();
+        try {
+            if (root == null || root.getWindowId() != mFlowWindow || root.getPackageName() == null
+                    || !PaseoSelection.isPaseo(root.getPackageName().toString())) {
+                cancelPaseoFlow(); return;
+            }
+            try (PaseoTree tree = new PaseoTree(root)) {
+                PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
+                if (editor == null || !mFlowComposer.equals(editor.handle)) {
+                    cancelPaseoFlow(); return;
+                }
+                mFlowGate.observe(editor, mFlowExpected);
+                if (mFlowGate.isCanceled()) cancelPaseoFlow();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Paseo observation failed; canceling", t);
+            cancelPaseoFlow();
+        } finally { if (root != null) root.recycle(); }
     }
 
     private CharSequence readPasteText(String completedTranscript) {
@@ -988,22 +1020,24 @@ public class VoiceVaultKeyService extends AccessibilityService {
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         int type = event.getEventType();
+        String pkg = event.getPackageName() == null ? null : event.getPackageName().toString();
+        if (mFlowComposer != null && !"com.android.systemui".equals(pkg)) {
+            if (type == AccessibilityEvent.TYPE_VIEW_CLICKED || type == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+                AccessibilityNodeInfo source = event.getSource();
+                try {
+                    if (source == null || !mFlowComposer.equals(source)) cancelPaseoFlow();
+                } finally { if (source != null) source.recycle(); }
+            } else if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                    || (PaseoSelection.isPaseo(pkg) && (type == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+                        || type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED))) {
+                // Keyboard window changes are harmless if the application's exact
+                // composer still exists; manual clears/remounts/navigation are not.
+                observePaseoFlow();
+            }
+        }
         if (type != AccessibilityEvent.TYPE_VIEW_CLICKED
                 && type != AccessibilityEvent.TYPE_VIEW_SCROLLED
                 && type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
-        String pkg = event.getPackageName() == null ? null : event.getPackageName().toString();
-        if (mFlowComposer != null && (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-                || type == AccessibilityEvent.TYPE_VIEW_SCROLLED
-                || (type == AccessibilityEvent.TYPE_VIEW_CLICKED
-                    && !"com.android.systemui".equals(pkg)))) {
-            AccessibilityNodeInfo flowSource = type == AccessibilityEvent.TYPE_VIEW_CLICKED ? event.getSource() : null;
-            try {
-                if (flowSource == null || !mFlowComposer.equals(flowSource)) {
-                    mPaseoGeneration++;
-                    clearFlowComposer();
-                }
-            } finally { if (flowSource != null) flowSource.recycle(); }
-        }
         if (type == AccessibilityEvent.TYPE_VIEW_CLICKED && mPendingDictation.matchesWindow(pkg, event.getWindowId())) {
             AccessibilityNodeInfo source = event.getSource();
             try {
@@ -1011,6 +1045,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 if (source == null || mPendingComposer == null || !mPendingComposer.equals(source)) {
                     mPendingDictation.cancel();
                     clearPendingComposer();
+                    mPendingPaseoId = -1;
                 }
             } finally { if (source != null) source.recycle(); }
         }
@@ -1019,6 +1054,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 && mPendingDictation.isPending() && !"com.android.systemui".equals(pkg)) {
             mPendingDictation.cancel();
             clearPendingComposer();
+            mPendingPaseoId = -1;
         }
     }
 
