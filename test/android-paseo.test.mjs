@@ -26,7 +26,16 @@ test('native path is isolated from generic multi-send and retains clipboard/hist
   assert.match(s, /readPasteText\(transcript\)/);
   assert.match(s, /mPendingDictation\.complete\(recordingId, text, packageName, windowId\)/);
   assert.match(s, /mPaseoGeneration\+\+;\s*clearFlowComposer\(\);\s*boolean accepted/);
-  assert.match(s, /if \(!editor\.text\.isEmpty\(\)\)/);
+  const adapter = s.split('private static final class PaseoTree')[1].split('private void paseoFeedback')[0];
+  assert.match(adapter, /n\.label = desc != null \? desc\.toString\(\) : hint != null \? hint\.toString\(\)/);
+  assert.match(adapter, /n\.text = PaseoSelection\.draftText\(n\.editable,\s*Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.O && info\.isShowingHintText\(\), text\)/);
+  const entry = s.split('private void pasteIntoPaseo(')[1].split('private boolean validPaseo(')[0];
+  const insertion = s.split('private void insertPaseo(')[1].split('private void checkPaseo(')[0];
+  assert.match(entry, /PaseoSelection\.composer\(tree\.root\)/);
+  assert.match(insertion, /!mFlowComposer\.equals\(editor\.handle\)/);
+  assert.match(insertion, /ACTION_SET_TEXT/);
+  assert.doesNotMatch(entry + insertion, /draft already exists|draft exists|editor\.text\.isEmpty\(\)/);
+  assert.match(s, /mFlowGate\.check\(tree\.root, editor, expected,/);
   assert.match(s, /paseoFeedback\("Copied —/);
   assert.match(s, /ACTION_IME_ENTER/); // unchanged other-app path
 });

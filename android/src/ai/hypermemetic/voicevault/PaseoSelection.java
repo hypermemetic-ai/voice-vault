@@ -6,6 +6,10 @@ import java.util.List;
 /** Conservative, source-label-based selection. No substring or ancestor click matching. */
 final class PaseoSelection {
     static final String COMPOSER = "Message agent...";
+    /** An editable node showing its platform hint has no user draft, even if getText returns the hint. */
+    static String draftText(boolean editable, boolean showingHintText, CharSequence text) {
+        return (editable && showingHintText) || text == null ? "" : text.toString();
+    }
     static boolean isPaseo(String pkg) {
         return "sh.paseo".equals(pkg) || "sh.paseo.debug".equals(pkg);
     }

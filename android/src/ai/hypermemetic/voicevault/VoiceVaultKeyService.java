@@ -684,7 +684,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
             // Editable text is never an identity label: it may be a user's draft.
             n.label = desc != null ? desc.toString() : hint != null ? hint.toString()
                     : !n.editable && text != null ? text.toString() : null;
-            n.text = text == null ? "" : text.toString();
+            n.text = PaseoSelection.draftText(n.editable,
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && info.isShowingHintText(), text);
             n.handle = info;
             for (int i = 0; i < info.getChildCount(); i++) {
                 AccessibilityNodeInfo child = info.getChild(i);
@@ -714,7 +715,6 @@ public class VoiceVaultKeyService extends AccessibilityService {
         try (PaseoTree tree = new PaseoTree(initialRoot)) {
             PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
             if (editor == null) { paseoFeedback("Copied — composer unavailable"); return; }
-            if (!editor.text.isEmpty()) { paseoFeedback("Copied — draft already exists"); return; }
             mFlowComposer = AccessibilityNodeInfo.obtain((AccessibilityNodeInfo) editor.handle);
             mFlowGate = new PaseoSelection.Gate();
             mFlowWindow = window;
@@ -742,8 +742,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (!validPaseo(generation, pkg, window, root)) { paseoFeedback("Copied — destination changed"); return; }
             try (PaseoTree tree = new PaseoTree(root)) {
                 PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
-                if (editor == null || !mFlowComposer.equals(editor.handle) || !editor.text.isEmpty()) {
-                    paseoFeedback("Copied — composer changed or draft exists"); return;
+                if (editor == null || !mFlowComposer.equals(editor.handle)) {
+                    paseoFeedback("Copied — composer changed"); return;
                 }
                 Bundle args = new Bundle();
                 args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, expected);
