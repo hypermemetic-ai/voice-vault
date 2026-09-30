@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Bundle;
+import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -64,6 +65,12 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private Runnable mPendingVolUpRunnable = null;
     private Runnable mPendingVolDnRunnable = null;
     private final PendingDictation mPendingDictation = new PendingDictation();
+    private AccessibilityNodeInfo mPendingComposer;
+    private long mPendingPaseoId = -1;
+    private int mPaseoGeneration = 0;
+    private AccessibilityNodeInfo mFlowComposer;
+    private PaseoSelection.Gate mFlowGate;
+    private int mFlowWindow = -1;
     private SharedPreferences mModePrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener mModeListener = (prefs, key) -> {
         if (PREF_DICTATION_MODE.equals(key)) {
@@ -112,6 +119,10 @@ public class VoiceVaultKeyService extends AccessibilityService {
     }
 
     private void cancelPendingKeyCallbacks() {
+        clearPendingComposer();
+        mPendingPaseoId = -1;
+        mPaseoGeneration++;
+        clearFlowComposer();
         mPendingDictation.cancel();
         mVolUpTiming.reset();
         mVolDnTiming.reset();
@@ -315,6 +326,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             }
         } catch (Throwable t) {
             mPendingDictation.cancel();
+            clearPendingComposer();
             Log.w(TAG, "Failed to stop recording service", t);
         }
     }
@@ -385,12 +397,22 @@ public class VoiceVaultKeyService extends AccessibilityService {
             pasteIntoFocusedField();
             return;
         }
+        if (mPendingDictation.isPending()) return;
         AccessibilityNodeInfo root = getApplicationRoot();
         try {
             mPendingDictation.cancel();
+            clearPendingComposer();
+            mPendingPaseoId = -1;
             if (root != null && root.getPackageName() != null) {
-                mPendingDictation.begin(VoiceVaultService.getRecordingStartTime(),
-                        root.getPackageName().toString(), root.getWindowId());
+                String pkg = root.getPackageName().toString();
+                mPendingDictation.begin(VoiceVaultService.getRecordingStartTime(), pkg, root.getWindowId());
+                if (PaseoSelection.isPaseo(pkg)) {
+                    mPendingPaseoId = VoiceVaultService.getRecordingStartTime();
+                    try (PaseoTree tree = new PaseoTree(root)) {
+                        PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
+                        if (editor != null) mPendingComposer = AccessibilityNodeInfo.obtain((AccessibilityNodeInfo) editor.handle);
+                    }
+                }
             }
         } finally {
             if (root != null) root.recycle();
@@ -408,8 +430,26 @@ public class VoiceVaultKeyService extends AccessibilityService {
             String packageName = root == null || root.getPackageName() == null
                     ? null : root.getPackageName().toString();
             int windowId = root == null ? -1 : root.getWindowId();
+            boolean sameComposer = true;
+            if (PaseoSelection.isPaseo(packageName)) {
+                sameComposer = false;
+                if (root != null && mPendingComposer != null) {
+                    try (PaseoTree tree = new PaseoTree(root)) {
+                        PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
+                        sameComposer = editor != null && mPendingComposer.equals(editor.handle);
+                    }
+                }
+            }
             String result = mPendingDictation.complete(recordingId, text, packageName, windowId);
-            if (result != null) pasteIntoFocusedField(result);
+            boolean wasPaseo = recordingId == mPendingPaseoId;
+            if (wasPaseo) mPendingPaseoId = -1;
+            clearPendingComposer();
+            if (result != null) {
+                if (sameComposer) pasteIntoFocusedField(result);
+                else FloatingPillOverlay.showFeedback(this, "Copied — composer changed", false);
+            } else if (wasPaseo && text != null && !text.trim().isEmpty()) {
+                FloatingPillOverlay.showFeedback(this, "Copied — destination changed", false);
+            }
         } finally {
             if (root != null) root.recycle();
         }
@@ -452,6 +492,10 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
     private void toggleDictation() {
         mPendingDictation.cancel();
+        clearPendingComposer();
+        mPendingPaseoId = -1;
+        mPaseoGeneration++;
+        clearFlowComposer();
         Intent intent = new Intent(this, VoiceVaultService.class);
         if (VoiceVaultService.isRecording()) {
             intent.setAction(VoiceVaultService.ACTION_STOP);
@@ -477,6 +521,17 @@ public class VoiceVaultKeyService extends AccessibilityService {
     }
 
     private void pasteIntoFocusedField(String completedTranscript) {
+        // Paseo never enters the generic IME / broad-button / repeated-send path.
+        AccessibilityNodeInfo appRoot = getApplicationRoot();
+        if (appRoot != null) {
+            try {
+                String pkg = appRoot.getPackageName() == null ? null : appRoot.getPackageName().toString();
+                if (PaseoSelection.isPaseo(pkg)) {
+                    pasteIntoPaseo(appRoot, completedTranscript);
+                    return;
+                }
+            } finally { appRoot.recycle(); }
+        }
         AccessibilityNodeInfo target = null;
         AccessibilityNodeInfo root = null;
         try {
@@ -596,6 +651,152 @@ public class VoiceVaultKeyService extends AccessibilityService {
         }
     }
 
+
+    private void clearPendingComposer() {
+        if (mPendingComposer != null) mPendingComposer.recycle();
+        mPendingComposer = null;
+    }
+
+    private void clearFlowComposer() {
+        if (mFlowGate != null) mFlowGate.cancel();
+        mFlowGate = null;
+        if (mFlowComposer != null) mFlowComposer.recycle();
+        mFlowComposer = null;
+        mFlowWindow = -1;
+    }
+
+    /** Owns all child handles; the supplied root remains owned by the caller. */
+    private static final class PaseoTree implements AutoCloseable {
+        final PaseoSelection.Node root;
+        final java.util.ArrayList<AccessibilityNodeInfo> owned = new java.util.ArrayList<>();
+        PaseoTree(AccessibilityNodeInfo node) { root = visit(node, "", true); }
+        private PaseoSelection.Node visit(AccessibilityNodeInfo info, String path, boolean visible) {
+            PaseoSelection.Node n = new PaseoSelection.Node();
+            Rect rect = new Rect();
+            info.getBoundsInScreen(rect);
+            n.left = rect.left; n.top = rect.top; n.right = rect.right; n.bottom = rect.bottom;
+            n.path = path;
+            n.visible = visible && info.isVisibleToUser() && !rect.isEmpty();
+            n.enabled = info.isEnabled(); n.clickable = info.isClickable(); n.editable = info.isEditable();
+            CharSequence desc = info.getContentDescription();
+            CharSequence hint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? info.getHintText() : null;
+            CharSequence text = info.getText();
+            // Editable text is never an identity label: it may be a user's draft.
+            n.label = desc != null ? desc.toString() : hint != null ? hint.toString()
+                    : !n.editable && text != null ? text.toString() : null;
+            n.text = text == null ? "" : text.toString();
+            n.handle = info;
+            for (int i = 0; i < info.getChildCount(); i++) {
+                AccessibilityNodeInfo child = info.getChild(i);
+                if (child != null) {
+                    owned.add(child);
+                    n.children.add(visit(child, path + "/" + i, n.visible));
+                }
+            }
+            return n;
+        }
+        @Override public void close() { for (AccessibilityNodeInfo node : owned) node.recycle(); }
+    }
+
+    private void paseoFeedback(String message) {
+        clearFlowComposer();
+        FloatingPillOverlay.showFeedback(this, message, false);
+    }
+
+    private void pasteIntoPaseo(AccessibilityNodeInfo initialRoot, String transcript) {
+        final int generation = ++mPaseoGeneration;
+        clearFlowComposer();
+        CharSequence value = readPasteText(transcript);
+        if (value == null || value.length() == 0) { paseoFeedback("Nothing to insert"); return; }
+        final String expected = value.toString();
+        final String pkg = initialRoot.getPackageName().toString();
+        final int window = initialRoot.getWindowId();
+        try (PaseoTree tree = new PaseoTree(initialRoot)) {
+            PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
+            if (editor == null) { paseoFeedback("Copied — composer unavailable"); return; }
+            if (!editor.text.isEmpty()) { paseoFeedback("Copied — draft already exists"); return; }
+            mFlowComposer = AccessibilityNodeInfo.obtain((AccessibilityNodeInfo) editor.handle);
+            mFlowGate = new PaseoSelection.Gate();
+            mFlowWindow = window;
+            AccessibilityNodeInfo input = (AccessibilityNodeInfo) editor.handle;
+            if (!input.isFocused() && !input.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) {
+                paseoFeedback("Copied — composer not ready"); clearFlowComposer(); return;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Paseo composer lookup failed", t);
+            paseoFeedback("Copied — composer unavailable"); clearFlowComposer(); return;
+        }
+        mKeyHandler.postDelayed(() -> insertPaseo(generation, pkg, window, expected), 80);
+    }
+
+    private boolean validPaseo(int generation, String pkg, int window, AccessibilityNodeInfo root) {
+        return generation == mPaseoGeneration && isDictationModeEnabled() && root != null
+                && root.getPackageName() != null && pkg.equals(root.getPackageName().toString())
+                && root.getWindowId() == window && mFlowWindow == window;
+    }
+
+    private void insertPaseo(int generation, String pkg, int window, String expected) {
+        if (generation != mPaseoGeneration) return;
+        AccessibilityNodeInfo root = getApplicationRoot();
+        try {
+            if (!validPaseo(generation, pkg, window, root)) { paseoFeedback("Copied — destination changed"); return; }
+            try (PaseoTree tree = new PaseoTree(root)) {
+                PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
+                if (editor == null || !mFlowComposer.equals(editor.handle) || !editor.text.isEmpty()) {
+                    paseoFeedback("Copied — composer changed or draft exists"); return;
+                }
+                Bundle args = new Bundle();
+                args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, expected);
+                if (!mFlowGate.write() || !((AccessibilityNodeInfo) editor.handle).performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                    paseoFeedback("Copied — insertion unavailable"); return;
+                }
+            }
+            // One write only. Poll fresh snapshots for echo and a ready unique submit.
+            mKeyHandler.postDelayed(() -> checkPaseo(generation, pkg, window, expected, 0), 80);
+        } catch (Throwable t) {
+            Log.w(TAG, "Paseo insertion failed", t); paseoFeedback("Copied — insertion uncertain");
+        } finally { if (root != null) root.recycle(); }
+    }
+
+    private void checkPaseo(int generation, String pkg, int window, String expected, int attempt) {
+        if (generation != mPaseoGeneration) return;
+        AccessibilityNodeInfo root = getApplicationRoot();
+        boolean retry = false;
+        try {
+            if (!validPaseo(generation, pkg, window, root)) { paseoFeedback("Copied — destination changed"); clearFlowComposer(); return; }
+            try (PaseoTree tree = new PaseoTree(root)) {
+                PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
+                if (editor == null || !mFlowComposer.equals(editor.handle)) {
+                    paseoFeedback("Copied — composer changed"); return;
+                }
+                PaseoSelection.Status state = mFlowGate.check(tree.root, editor, expected,
+                        isAutoSendEnabled(), attempt);
+                if (state == PaseoSelection.Status.ABORT) {
+                    paseoFeedback("Copied — draft changed or send unavailable"); clearFlowComposer(); return;
+                }
+                if (state == PaseoSelection.Status.INSERTED) {
+                    clearFlowComposer(); return;
+                }
+                if (state == PaseoSelection.Status.WAIT) retry = true;
+                else {
+                    PaseoSelection.Node button = PaseoSelection.submit(tree.root, editor);
+                    // Consume before dispatch; action return or later UI state must never trigger a retry.
+                    if (!mFlowGate.dispatch()) { paseoFeedback("Copied — send manually"); return; }
+                    mPaseoGeneration++;
+                    clearFlowComposer();
+                    boolean accepted = ((AccessibilityNodeInfo) button.handle).performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    if (!accepted) paseoFeedback("Draft ready — send manually");
+                    return;
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Paseo readiness failed", t); paseoFeedback("Copied — send manually"); return;
+        } finally { if (root != null) root.recycle(); }
+        if (retry) {
+            mKeyHandler.postDelayed(() -> checkPaseo(generation, pkg, window, expected,
+                    attempt + 1), 100);
+        }
+    }
 
     private CharSequence readPasteText(String completedTranscript) {
         CharSequence clipText = completedTranscript;
@@ -786,11 +987,38 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event.getEventType() != AccessibilityEvent.TYPE_VIEW_CLICKED) return;
-        String packageName = event.getPackageName() == null ? null : event.getPackageName().toString();
-        // SystemUI clipboard dismissal is unrelated to the destination conversation.
-        if (mPendingDictation.matchesWindow(packageName, event.getWindowId())) {
+        int type = event.getEventType();
+        if (type != AccessibilityEvent.TYPE_VIEW_CLICKED
+                && type != AccessibilityEvent.TYPE_VIEW_SCROLLED
+                && type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+        String pkg = event.getPackageName() == null ? null : event.getPackageName().toString();
+        if (mFlowComposer != null && (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                || type == AccessibilityEvent.TYPE_VIEW_SCROLLED
+                || (type == AccessibilityEvent.TYPE_VIEW_CLICKED
+                    && !"com.android.systemui".equals(pkg)))) {
+            AccessibilityNodeInfo flowSource = type == AccessibilityEvent.TYPE_VIEW_CLICKED ? event.getSource() : null;
+            try {
+                if (flowSource == null || !mFlowComposer.equals(flowSource)) {
+                    mPaseoGeneration++;
+                    clearFlowComposer();
+                }
+            } finally { if (flowSource != null) flowSource.recycle(); }
+        }
+        if (type == AccessibilityEvent.TYPE_VIEW_CLICKED && mPendingDictation.matchesWindow(pkg, event.getWindowId())) {
+            AccessibilityNodeInfo source = event.getSource();
+            try {
+                // A positively identified same-editor focus is harmless; everything else cancels.
+                if (source == null || mPendingComposer == null || !mPendingComposer.equals(source)) {
+                    mPendingDictation.cancel();
+                    clearPendingComposer();
+                }
+            } finally { if (source != null) source.recycle(); }
+        }
+        if ((type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                || (type == AccessibilityEvent.TYPE_VIEW_SCROLLED && PaseoSelection.isPaseo(pkg)))
+                && mPendingDictation.isPending() && !"com.android.systemui".equals(pkg)) {
             mPendingDictation.cancel();
+            clearPendingComposer();
         }
     }
 
