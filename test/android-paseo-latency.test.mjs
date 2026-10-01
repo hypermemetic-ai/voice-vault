@@ -12,12 +12,37 @@ function between(source, start, end) {
   assert.ok(source.includes(start) && source.includes(end));
   return source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 }
+test('Paseo autosend survives native layout and React readiness changes', () => {
+  const out = mkdtempSync(path.join(tmpdir(), 'paseo-autosend-'));
+  try {
+    const source = readFileSync(service, 'utf8');
+    const methods = between(source, '    private void insertCompletedRecording(', '    /** An IME')
+      + between(source, '    private void clearPendingComposer()', '    private CharSequence readPasteText(')
+      + between(source, '    public void onAccessibilityEvent(', '    @Override\n    public void onInterrupt()');
+    const file = path.join(out, 'PaseoServiceHarness.java');
+    writeFileSync(file, readFileSync('test/fixtures/PaseoServiceHarness.java', 'utf8').replace('    // PRODUCTION_METHODS', methods));
+    for (const args of [
+      ['javac', '--release', '11', '-d', out, `${sourceDir}PaseoSelection.java`, `${sourceDir}PendingDictation.java`, file],
+      ['java', '-cp', out, 'ai.hypermemetic.voicevault.PaseoServiceHarness', 'autosend'],
+    ]) {
+      const result = spawnSync(args[0], args.slice(1), { encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr || result.error?.message);
+    }
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
 test('production Paseo methods: same long-tree before/after query/timer model and focused safety', () => {
   const out = mkdtempSync(path.join(tmpdir(), 'paseo-latency-'));
   try {
     const before = spawnSync('git', ['show', `${base}:${service}`], { encoding: 'utf8' });
     assert.equal(before.status, 0, before.stderr);
     for (const [revision, source] of [['before', before.stdout], ['after', readFileSync(service, 'utf8')]]) {
+      // The historical production methods use an attempt-count Gate API.
+      const gateFile = path.join(out, 'PaseoSelection.java');
+      if (revision === 'before') {
+        const gate = spawnSync('git', ['show', `b8fe788:${sourceDir}PaseoSelection.java`], { encoding: 'utf8' });
+        assert.equal(gate.status, 0, gate.stderr);
+        writeFileSync(gateFile, gate.stdout);
+      } else writeFileSync(gateFile, readFileSync(`${sourceDir}PaseoSelection.java`, 'utf8'));
       const methods = between(source, '    private void insertCompletedRecording(', '    /** An IME')
         + between(source, '    private void clearPendingComposer()', '    private CharSequence readPasteText(')
         + between(source, '    public void onAccessibilityEvent(', '    @Override\n    public void onInterrupt()');
@@ -25,7 +50,7 @@ test('production Paseo methods: same long-tree before/after query/timer model an
       const file = path.join(out, 'PaseoServiceHarness.java');
       writeFileSync(file, harness);
       for (const args of [
-        ['javac', '--release', '11', '-d', out, `${sourceDir}PaseoSelection.java`, `${sourceDir}PendingDictation.java`, file],
+        ['javac', '--release', '11', '-d', out, gateFile, `${sourceDir}PendingDictation.java`, file],
         ['java', '-cp', out, 'ai.hypermemetic.voicevault.PaseoServiceHarness', revision],
       ]) {
         const result = spawnSync(args[0], args.slice(1), { encoding: 'utf8' });

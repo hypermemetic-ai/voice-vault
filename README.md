@@ -13,7 +13,7 @@ Ultra-reliable, local-first asynchronous voice recorder and dictation tool for A
 - **Dynamic Floating Status Overlay**: Compact, semi-transparent top status rectangle displaying live recording duration, transcription state (`Processing`), and completion status (`Copied`), positioned clear of the front camera punch-hole.
 - **Slide-Out History Drawer**: Access the last 50 transcriptions and cached recordings grouped by date, with 1-tap copy to clipboard and duration metrics.
 - **Zero-Latency Acoustic Feedback**: Directly synthesized 16-bit 44.1kHz mono PCM audio (<3ms latency) with warm liquid start pops and glass bell harmonic completion chimes.
-- **Physical Side-Button Trigger**: Optional double-tap Volume Down shortcut via Android Accessibility Service.
+- **Physical Side-Button Controls**: In Dictation Mode, Volume Up starts/stops recording and Volume Down finishes dictation, inserts the text and sends it when Auto-send is on. Double Volume Up toggles Dictation Mode. Auto-send is controlled by the dashboard checkbox; pressing Down again never changes that setting.
 - **Floating Screen Edge Bubble**: Draggable on-screen toggle button for devices without rear-tap gestures.
 - **Whisper Large v3 Turbo Backend**: Local Node.js server with SQLite storage, VAD silence trimming, anti-hallucination sanitization, and streaming sliding-window support for arbitrarily long recordings.
 - **Four-Tier Backend Cascade**: Warm daemon → RTX A2000 → Radeon 780M iGPU → CPU. A wedged daemon is capped at 15 s and rejected on any non-200 or `{ ok: false }` reply, so a constrained GPU never leaves the client stuck on "Processing...".

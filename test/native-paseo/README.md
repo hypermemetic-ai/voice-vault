@@ -71,3 +71,9 @@ Successful automatic dispatch deliberately does not announce server acceptance.
 Manual cancellation preserves a sentinel feedback rather than replacing it with
 a misleading composer/draft failure. Unresolved exact-echoed autosend reports
 `Inserted — send manually`; a write without echo reports insertion unconfirmed.
+
+The 1.2.16 source repair uses a two-second readiness deadline, accepts a unique
+exact local send control without optional toolbar peers, and revalidates normal
+composer resizing. The fixture waits/auto-send-off feedback have been updated
+accordingly. Those changes were covered by JVM production-method regressions;
+the historical native run above does not validate this newer production version.

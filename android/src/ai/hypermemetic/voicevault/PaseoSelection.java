@@ -38,56 +38,17 @@ final class PaseoSelection {
         // 28dp controls, row marginHorizontal -6). Scale locality by the control,
         // not by the variable input height; never search arbitrary global labels.
         collect(root, n -> !n.editable && n.visible && n.enabled && n.clickable
-                && primary(n.label) && lowerToolbar(root, editor, n), matches);
+                && primary(n.label) && lowerToolbar(editor, n), matches);
         return matches.size() == 1 ? matches.get(0) : null;
     }
-    private static boolean lowerToolbar(Node root, Node editor, Node button) {
+    private static boolean lowerToolbar(Node editor, Node button) {
         int height = button.bottom - button.top;
-        if (height <= 0 || button.right <= button.left || button.top < editor.bottom
-                || button.top - editor.bottom > 2 * height
-                || button.left < (editor.left + editor.right) / 2
-                || Math.abs(button.right - editor.right) > height) return false;
-        Node container = commonContainer(root, editor, button);
-        if (container == null) return false;
-        // Android may omit non-important COLUMN/row groups from the exported
-        // accessibility tree. In that case require direct sibling input/control
-        // and an adjacent toolbar peer, not just a label anywhere in the window.
-        if (container.children.contains(editor) && container.children.contains(button)) {
-            for (Node peer : container.children) {
-                if (peer != button && !peer.editable && peer.visible && peer.clickable
-                        && peer.label != null
-                        && peer.top == button.top && peer.bottom == button.bottom
-                        && peer.right <= button.left && button.left - peer.right <= height / 2
-                        && peer.left >= editor.left - height) return true;
-            }
-        }
-        if (container == root) return false;
-        // The common composer wrapper contains separate text-surface and toolbar
-        // branches. A screen/chat ancestor or tooltip ancestor is not that wrapper.
-        Node textBranch = branch(container, editor);
-        Node toolbarBranch = branch(container, button);
-        return textBranch != null && toolbarBranch != null && textBranch != toolbarBranch
-                && textBranch.bottom <= editor.bottom && toolbarBranch.top >= editor.bottom
-                && container.left <= editor.left && container.right >= editor.right
-                && container.left >= editor.left - height && container.right <= editor.right + height
-                && container.bottom <= button.bottom + height;
-    }
-    private static Node commonContainer(Node node, Node a, Node b) {
-        if (!contains(node, a) || !contains(node, b)) return null;
-        for (Node child : node.children) {
-            Node found = commonContainer(child, a, b);
-            if (found != null) return found;
-        }
-        return node;
-    }
-    private static Node branch(Node container, Node target) {
-        for (Node child : container.children) if (contains(child, target)) return child;
-        return null;
-    }
-    private static boolean contains(Node node, Node target) {
-        if (node == target) return true;
-        for (Node child : node.children) if (contains(child, target)) return true;
-        return false;
+        // Native export can omit any subset of wrappers and optional controls.
+        // Exact labels, uniqueness and local geometry identify the primary action.
+        return height > 0 && button.right > button.left && button.top >= editor.bottom
+                && button.top - editor.bottom <= 2 * height
+                && button.left >= (editor.left + editor.right) / 2
+                && Math.abs(button.right - editor.right) <= height;
     }
     interface Filter { boolean accept(Node n); }
     private static void collect(Node n, Filter f, List<Node> matches) {
@@ -112,14 +73,14 @@ final class PaseoSelection {
             if (expected.equals(editor.text)) echoed = true;
             else if (echoed || (!editor.text.isEmpty() && !before.equals(editor.text))) cancel();
         }
-        Status check(Node root, Node editor, String expected, boolean autoSend, int attempt) {
+        Status check(Node root, Node editor, String expected, boolean autoSend, boolean expired) {
             ready = false;
             observe(editor, expected);
             if (!written || dispatched || canceled) return Status.ABORT;
-            if (!expected.equals(editor.text)) return attempt < 7 ? Status.WAIT : Status.UNCONFIRMED;
+            if (!expected.equals(editor.text)) return expired ? Status.UNCONFIRMED : Status.WAIT;
             if (!autoSend) return Status.INSERTED;
             if (submit(root, editor) != null) { ready = true; return Status.SEND; }
-            return attempt < 7 ? Status.WAIT : Status.MANUAL;
+            return expired ? Status.MANUAL : Status.WAIT;
         }
         boolean dispatch() {
             if (!written || dispatched || canceled || !echoed || !ready) return false;
