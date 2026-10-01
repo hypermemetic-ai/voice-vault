@@ -39,7 +39,7 @@ import java.util.Locale;
  *       <li>Single Volume Up: toggles recording (start/stop + Whisper transcription).</li>
  *       <li>Double-press Volume Up: disables Dictation Mode.</li>
  *       <li>Single Volume Down: stops/waits for transcription, then inserts (and auto-sends if enabled).</li>
- *       <li>Double-press Volume Down: toggles auto-send on paste (pref_auto_send_on_paste).</li>
+ *       <li>Auto-send is controlled by the dashboard checkbox; repeated Down presses are debounced.</li>
  *     </ul>
  *     Both keys are consumed so the system volume never changes.
  *   </li>
@@ -60,10 +60,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
     private final Handler mKeyHandler = new Handler(Looper.getMainLooper());
     private final VolumeUpTiming mVolUpTiming = new VolumeUpTiming();
-    // Same deadline logic, independent first-press state for Down.
-    private final VolumeUpTiming mVolDnTiming = new VolumeUpTiming();
+    private long mLastVolDownTime = -1;
     private Runnable mPendingVolUpRunnable = null;
-    private Runnable mPendingVolDnRunnable = null;
     private final PendingDictation mPendingDictation = new PendingDictation();
     private AccessibilityNodeInfo mPendingComposer;
     private long mPendingPaseoId = -1;
@@ -74,7 +72,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private int mFlowWindow = -1;
     private String mFlowPackage;
     private Runnable mPaseoCheck;
-    private int mPaseoAttempt;
+    private long mPaseoDeadline;
+    private static final long PASEO_READY_TIMEOUT_MS = 2000L;
     private SharedPreferences mModePrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener mModeListener = (prefs, key) -> {
         if (PREF_DICTATION_MODE.equals(key)) {
@@ -129,15 +128,12 @@ public class VoiceVaultKeyService extends AccessibilityService {
         clearFlowComposer();
         mPendingDictation.cancel();
         mVolUpTiming.reset();
-        mVolDnTiming.reset();
+        mLastVolDownTime = -1;
         if (mPendingVolUpRunnable != null) {
             mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
             mPendingVolUpRunnable = null;
         }
-        if (mPendingVolDnRunnable != null) {
-            mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
-            mPendingVolDnRunnable = null;
-        }
+
     }
 
     /**
@@ -283,35 +279,10 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 mKeyHandler.postDelayed(single, VolumeUpTiming.UP_WINDOW_MS + 1);
                 return true;
             } else if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-                VolumeUpTiming.ActivePress press = mVolDnTiming.activePress(SystemClock.uptimeMillis());
-                if (press == VolumeUpTiming.ActivePress.DOUBLE) {
-                    // Double-press Volume Down while active -> TOGGLE auto-send
-                    mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
-                    mPendingVolDnRunnable = null;
-                    boolean newAutoSend = !isAutoSendEnabled();
-                    setAutoSendEnabled(newAutoSend);
-                    Log.i(TAG, "Dictation Mode ON: Vol Dn double-press -> auto-send " + (newAutoSend ? "ENABLED" : "DISABLED"));
-                    provideFeedback(newAutoSend, "Auto-send: " + (newAutoSend ? "ON" : "OFF"));
-                    return true;
-                }
-                if (press == VolumeUpTiming.ActivePress.EXPIRED_FIRST) {
-                    // Handler may be late: finish the first single before starting a new window.
-                    mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
-                    mPendingVolDnRunnable = null;
-                    Log.i(TAG, "Dictation Mode: expired Vol Dn single-press -> finish and insert");
-                    finishAndInsert();
-                }
-                Runnable single = new Runnable() {
-                    @Override public void run() {
-                        if (mPendingVolDnRunnable != this) return;
-                        mPendingVolDnRunnable = null;
-                        mVolDnTiming.activeSingleFinished();
-                        Log.i(TAG, "Dictation Mode: Vol Dn single-press -> finish and insert");
-                        finishAndInsert();
-                    }
-                };
-                mPendingVolDnRunnable = single;
-                mKeyHandler.postDelayed(single, VolumeUpTiming.UP_WINDOW_MS + 1);
+                long now = SystemClock.uptimeMillis();
+                if (mLastVolDownTime >= 0 && now - mLastVolDownTime < VolumeUpTiming.UP_WINDOW_MS) return true;
+                mLastVolDownTime = now;
+                finishAndInsert();
                 return true;
             }
         }
@@ -338,11 +309,6 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private void setDictationModeEnabled(boolean enabled) {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         prefs.edit().putBoolean(PREF_DICTATION_MODE, enabled).apply();
-    }
-
-    private void setAutoSendEnabled(boolean enabled) {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        prefs.edit().putBoolean(PREF_AUTO_SEND, enabled).apply();
     }
 
     private void notifyTileStateChanged() {
@@ -673,6 +639,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
         mFlowComposer = null;
         mFlowWindow = -1;
         mFlowPackage = null;
+        mPaseoDeadline = 0;
         if (mPaseoCheck != null) mKeyHandler.removeCallbacks(mPaseoCheck);
         mPaseoCheck = null;
     }
@@ -774,7 +741,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             mFlowExpected = expected;
             mFlowWindow = window;
             mFlowPackage = pkg;
-            mPaseoAttempt = 0;
+            mPaseoDeadline = SystemClock.uptimeMillis() + PASEO_READY_TIMEOUT_MS;
             if (!mFlowComposer.isFocused()) {
                 if (!mFlowComposer.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) {
                     paseoFeedback("Copied — composer not ready"); return;
@@ -797,7 +764,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
     private boolean validPaseo(int generation, String pkg, int window, AccessibilityNodeInfo root) {
         return generation == mPaseoGeneration && isDictationModeEnabled() && root != null
-                && root.getPackageName() != null && pkg.equals(root.getPackageName().toString())
+                && pkg != null && root.getPackageName() != null && pkg.equals(root.getPackageName().toString())
                 && root.getWindowId() == window && mFlowWindow == window;
     }
 
@@ -815,13 +782,13 @@ public class VoiceVaultKeyService extends AccessibilityService {
             }
             // Check exact accessibility echo immediately; delayed RN readiness is
             // event-driven with a single bounded fallback timer, not mandatory sleep.
-            checkPaseo(generation, pkg, window, expected, 0);
+            checkPaseo(generation, pkg, window, expected);
         } catch (Throwable t) {
             Log.w(TAG, "Paseo insertion failed", t); paseoFeedback("Copied — insertion uncertain");
         } finally { if (root != null) root.recycle(); }
     }
 
-    private void checkPaseo(int generation, String pkg, int window, String expected, int attempt) {
+    private void checkPaseo(int generation, String pkg, int window, String expected) {
         if (generation != mPaseoGeneration) return;
         AccessibilityNodeInfo root = getApplicationRoot();
         boolean retry = false;
@@ -838,14 +805,14 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 PaseoSelection.Node editor = tree == null ? fresh : PaseoSelection.composer(tree.root);
                 if (editor == null || !mFlowComposer.equals(editor.handle)) { cancelPaseoFlow(); return; }
                 PaseoSelection.Status state = mFlowGate.check(tree == null ? null : tree.root, editor, expected,
-                        needToolbar, attempt);
+                        needToolbar, SystemClock.uptimeMillis() >= mPaseoDeadline);
                 if (state == PaseoSelection.Status.ABORT) {
                     cancelPaseoFlow(); return;
                 }
                 String feedback = PaseoSelection.feedback(state);
                 if (feedback != null) { paseoFeedback(feedback); return; }
                 if (state == PaseoSelection.Status.INSERTED) {
-                    clearFlowComposer(); return;
+                    paseoFeedback("Inserted — auto-send OFF"); return;
                 }
                 if (state == PaseoSelection.Status.WAIT) retry = true;
                 else {
@@ -854,14 +821,17 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     // Refresh the actual action target and editor immediately. A
                     // changed label/geometry/readiness needs a new bounded check.
                     if (!target.refresh() || !sameButton(button, PaseoTree.describe(target))) {
-                        schedulePaseoCheck(generation, pkg, window, expected, attempt + 1, 100);
+                        schedulePaseoCheck(generation, pkg, window, expected, 100);
                         return;
                     }
                     PaseoSelection.Node echo = currentComposer(root, mFlowComposer);
                     mFlowGate.observe(echo, expected);
-                    if (echo == null || !sameBounds(editor, echo)
-                            || !expected.equals(echo.text) || mFlowGate.isCanceled()) {
+                    if (echo == null || !expected.equals(echo.text) || mFlowGate.isCanceled()) {
                         cancelPaseoFlow(); return;
+                    }
+                    if (!sameBounds(editor, echo)) {
+                        schedulePaseoCheck(generation, pkg, window, expected, 100);
+                        return;
                     }
                     // Consume before dispatch; action return or later UI state must never trigger a retry.
                     if (!mFlowGate.dispatch()) { cancelPaseoFlow(); return; }
@@ -878,7 +848,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     ? PaseoSelection.Status.MANUAL : PaseoSelection.Status.UNCONFIRMED));
             return;
         } finally { if (root != null) root.recycle(); }
-        if (retry) schedulePaseoCheck(generation, pkg, window, expected, attempt + 1, 100);
+        if (retry) schedulePaseoCheck(generation, pkg, window, expected, 100);
     }
 
     private static int rootBoundsBottom(AccessibilityNodeInfo root) {
@@ -896,21 +866,20 @@ public class VoiceVaultKeyService extends AccessibilityService {
         return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
     }
 
-    private void schedulePaseoCheck(int generation, String pkg, int window, String expected,
-            int attempt, long delay) {
+    private void schedulePaseoCheck(int generation, String pkg, int window, String expected, long delay) {
         if (generation != mPaseoGeneration || mFlowGate == null) return;
-        if (attempt > 7) {
+        long remaining = mPaseoDeadline - SystemClock.uptimeMillis();
+        if (remaining <= 0) {
             paseoFeedback(PaseoSelection.feedback(mFlowGate.hasEcho()
                     ? PaseoSelection.Status.MANUAL : PaseoSelection.Status.UNCONFIRMED));
             return;
         }
         if (mPaseoCheck != null) mKeyHandler.removeCallbacks(mPaseoCheck);
-        mPaseoAttempt = attempt;
         mPaseoCheck = () -> {
             mPaseoCheck = null;
-            checkPaseo(generation, pkg, window, expected, attempt);
+            checkPaseo(generation, pkg, window, expected);
         };
-        mKeyHandler.postDelayed(mPaseoCheck, delay);
+        mKeyHandler.postDelayed(mPaseoCheck, Math.min(delay, remaining));
     }
 
     private void cancelPaseoFlow() {
@@ -930,7 +899,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             // Coalesce bursts; observation itself never walks history or toolbar.
             // Pull the pending readiness check forward without resetting its budget.
             if (mPaseoCheck != null) schedulePaseoCheck(mPaseoGeneration, mFlowPackage,
-                    mFlowWindow, mFlowExpected, mPaseoAttempt, 0);
+                    mFlowWindow, mFlowExpected, 0);
         } catch (Throwable t) {
             Log.w(TAG, "Paseo observation failed; canceling", t);
             cancelPaseoFlow();

@@ -120,13 +120,13 @@ public class PaseoFixtureTest extends Instrumentation {
             for (String kind : new String[] {"disabled", "ambiguous", "context only"}) {
                 setup(kind.equals("context only") ? "Context window 50% used" : "Send message", false,
                         !kind.equals("disabled"), kind.equals("ambiguous"), 0, false);
-                dump(kind); begin("ready draft"); pause(1300);
+                dump(kind); begin("ready draft"); pause(2300);
                 result(kind, 0, "Inserted — send manually");
                 check("ready draft".equals(activity.editor.getText().toString()), "inserted text lost");
             }
             setup("Send message", false, true, false, 0, false);
             main(() -> service.getSharedPreferences("voice_vault_prefs", 0).edit().putBoolean("pref_auto_send_on_paste", false).commit());
-            begin("insert only"); pause(1300); result("auto-send off", 0, "Sentinel");
+            begin("insert only"); pause(1300); result("auto-send off", 0, "Inserted — auto-send OFF");
             main(() -> service.getSharedPreferences("voice_vault_prefs", 0).edit().putBoolean("pref_auto_send_on_paste", true).commit());
             // Manual action/remount before echo: poll can see the remount before its
             // queued accessibility event. Native object identity must still cancel.
@@ -146,7 +146,7 @@ public class PaseoFixtureTest extends Instrumentation {
             setup("Send message", false, true, false, 0, false); begin(PaseoSelection.COMPOSER); pause(1300);
             result("literal placeholder text is real echo", 1, "Sentinel");
             check(PaseoSelection.COMPOSER.equals(activity.submitted), "literal hint lost");
-            setup("Send message", false, true, false, 5000, false); begin("not echoed"); pause(1300);
+            setup("Send message", false, true, false, 5000, false); begin("not echoed"); pause(2300);
             result("unconfirmed insertion", 0, "Copied — insertion unconfirmed; paste manually");
             finalResult.putString("stream", "OK native cases=" + cases + "; no network permission, mock handler only\n");
             finish(ActivityResult.OK, finalResult);

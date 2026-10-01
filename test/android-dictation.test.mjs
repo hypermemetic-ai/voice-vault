@@ -117,12 +117,12 @@ test("manifest wires tile long-press and bumps version", () => {
     "MainActivity must declare QS_TILE_PREFERENCES",
   );
   assert.ok(
-    manifest.includes('android:versionCode="18"'),
-    "expected versionCode 18",
+    manifest.includes('android:versionCode="20"'),
+    "expected versionCode 20",
   );
   assert.ok(
-    manifest.includes('android:versionName="1.2.14"'),
-    "expected versionName 1.2.14",
+    manifest.includes('android:versionName="1.2.16"'),
+    "expected versionName 1.2.16",
   );
 });
 
@@ -299,20 +299,18 @@ test("VoiceVaultKeyService supports double-press Volume Up to toggle Dictation M
   );
 });
 
-test("VoiceVaultKeyService supports double-press Volume Down to toggle auto-send on paste", () => {
+test("Volume Down directly inserts and leaves auto-send under explicit dashboard control", () => {
   const source = read(KEY_SERVICE);
   assert.ok(
-    source.includes("mPendingVolDnRunnable"),
-    "VoiceVaultKeyService must debounce single Volume Down press",
+    source.includes("mLastVolDownTime"),
+    "VoiceVaultKeyService must debounce repeated Volume Down presses",
   );
   assert.ok(
-    source.includes("setAutoSendEnabled(!isAutoSendEnabled())") ||
-      source.includes("boolean newAutoSend = !isAutoSendEnabled()") ||
-      source.includes("setAutoSendEnabled(newAutoSend)"),
-    "VoiceVaultKeyService must toggle auto-send preference on double-press Volume Down",
+    !source.includes("setAutoSendEnabled") && !source.includes("mPendingVolDnRunnable"),
+    "Volume Down must not disable auto-send or delay insertion for a second press",
   );
   assert.ok(
-    source.includes("provideFeedback"),
-    "VoiceVaultKeyService must provide user feedback on toggle",
+    source.includes("Inserted — auto-send OFF"),
+    "Paseo insertion-only mode must explain why text was not sent",
   );
 });

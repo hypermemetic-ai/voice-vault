@@ -19,16 +19,11 @@ import android.os.PowerManager;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.util.Log;
+import android.widget.Toast;
 
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -54,8 +49,13 @@ public class VoiceVaultService extends Service {
     private PowerManager.WakeLock mWakeLock = null;
     private Handler mHandler = null;
     private Runnable mTimerRunnable = null;
+    private Runnable mRecorderStartRunnable = null;
+    private Runnable mProcessingTimeoutRunnable = null;
+    private boolean mRecorderStarted = false;
+    private DictationUpload mUpload = null;
+    private static final long PROCESSING_TIMEOUT_MS = 600000L;
     private int mGeneration = 0;
-    private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService mExecutor = Executors.newCachedThreadPool();
 
     public static boolean isRecording() {
         return sIsRecording;
@@ -230,7 +230,8 @@ public class VoiceVaultService extends Service {
     }
 
     private void startRecording() {
-        mGeneration++;
+        final int generation = ++mGeneration;
+        sRecordingStartTime = System.currentTimeMillis();
         try {
             PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
             if (pm != null) {
@@ -274,15 +275,17 @@ public class VoiceVaultService extends Service {
             playStrongStartFeedback();
 
             // Delay microphone start 90ms so start chirp is never recorded into user audio
-            mHandler.postDelayed(() -> {
+            mRecorderStartRunnable = () -> {
+                if (generation != mGeneration || !sIsRecording || mRecorder == null) return;
+                mRecorderStartRunnable = null;
                 try {
-                    if (sIsRecording && mRecorder != null) {
-                        mRecorder.start();
-                    }
+                    mRecorder.start();
+                    mRecorderStarted = true;
                 } catch (Exception ex) {
-                    Log.e(TAG, "Error starting recorder delayed", ex);
+                    failDictation(sRecordingStartTime, "Microphone failed — try again");
                 }
-            }, 90);
+            };
+            mHandler.postDelayed(mRecorderStartRunnable, 90);
 
             mTimerRunnable = new Runnable() {
                 @Override
@@ -305,35 +308,32 @@ public class VoiceVaultService extends Service {
             sendExplicitBroadcast(new Intent(BROADCAST_STATE_CHANGE));
 
         } catch (Exception e) {
-            Log.e(TAG, "Failed to start recording", e);
-            sIsRecording = false;
-            stopForeground(true);
-            FloatingPillOverlay.dismiss();
+            failDictation(sRecordingStartTime, "Microphone unavailable — check permission");
         }
     }
 
     private void stopAndTranscribe() {
         if (!sIsRecording) return;
         sIsRecording = false;
-        sIsProcessing = true;
-
-        if (mTimerRunnable != null) {
-            mHandler.removeCallbacks(mTimerRunnable);
-        }
+        cancelTimers();
 
         final long durationMs = System.currentTimeMillis() - sRecordingStartTime;
         final long recordingId = sRecordingStartTime;
         final int generation = mGeneration;
 
         try {
-            if (mRecorder != null) {
-                mRecorder.stop();
-                mRecorder.release();
-                mRecorder = null;
-            }
+            if (mRecorder == null || !mRecorderStarted) throw new IllegalStateException();
+            mRecorder.stop();
+            mRecorderStarted = false;
         } catch (Exception e) {
-            Log.e(TAG, "Error stopping recorder", e);
+            mRecorderStarted = false;
+            failDictation(recordingId, "Recording too short or failed — try again");
+            return;
+        } finally {
+            releaseRecorder();
         }
+
+        sIsProcessing = true;
 
         // Update floating pill to show sleek transcribing status
         FloatingPillOverlay.showTranscribing();
@@ -345,62 +345,30 @@ public class VoiceVaultService extends Service {
         sendExplicitBroadcast(new Intent(BROADCAST_STATE_CHANGE));
 
         final File audioFile = mCurrentAudioFile;
+        final DictationUpload upload = new DictationUpload();
+        mUpload = upload;
+        mProcessingTimeoutRunnable = () -> {
+            if (generation == mGeneration && sIsProcessing) {
+                failDictation(recordingId, "Transcription timed out — try again");
+            }
+        };
+        mHandler.postDelayed(mProcessingTimeoutRunnable, PROCESSING_TIMEOUT_MS);
         mExecutor.execute(() -> {
             try {
-                if (audioFile == null || !audioFile.exists() || audioFile.length() == 0) {
-                    throw new Exception("Recorded audio file is empty");
-                }
-
-                String endpoint = "https://qq-box.tail580136.ts.net:3443/api/transcribe";
-                URL url = new URL(endpoint);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setDoOutput(true);
-                conn.setConnectTimeout(30000);
-                conn.setReadTimeout(600000); // 10 minutes for long recordings
-                conn.setRequestProperty("Content-Type", "audio/mp4");
-                conn.setRequestProperty("X-Duration-Ms", String.valueOf(durationMs));
-                conn.setRequestProperty("X-Device", "Pixel 10 Native");
-                conn.setFixedLengthStreamingMode((int) audioFile.length());
-
-                try (OutputStream os = conn.getOutputStream();
-                     FileInputStream fis = new FileInputStream(audioFile)) {
-                    byte[] buffer = new byte[8192];
-                    int read;
-                    while ((read = fis.read(buffer)) != -1) {
-                        os.write(buffer, 0, read);
-                    }
-                    os.flush();
-                }
-
-                int code = conn.getResponseCode();
-                if (code == 200) {
-                    InputStream is = conn.getInputStream();
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    byte[] buf = new byte[4096];
-                    int len;
-                    while ((len = is.read(buf)) != -1) {
-                        baos.write(buf, 0, len);
-                    }
-                    String responseBody = baos.toString("UTF-8");
-                    JSONObject json = new JSONObject(responseBody);
-                    String text = json.optString("text", "");
-
-                    mHandler.post(() -> {
-                        if (generation == mGeneration) onTranscriptionSuccess(text, durationMs, recordingId);
-                    });
-                } else {
-                    throw new Exception("HTTP error " + code);
-                }
-
-            } catch (Exception e) {
-                Log.e(TAG, "Transcription failed", e);
+                JSONObject json = new JSONObject(upload.post(VoiceVaultApi.TRANSCRIBE_URL, audioFile, durationMs));
+                if (!json.optBoolean("ok", false)) throw new DictationUpload.Failure("Server rejected transcription");
+                if (!(json.opt("text") instanceof String)) throw new DictationUpload.Failure("Invalid server response");
+                String text = json.getString("text");
                 mHandler.post(() -> {
-                    if (generation != mGeneration) return;
-                    VoiceVaultKeyService.onTranscriptionFinished(recordingId, null);
-                    sIsProcessing = false;
-                    FloatingPillOverlay.showSuccess("Error");
-                    cleanup();
+                    if (generation != mGeneration || !sIsProcessing) return;
+                    mUpload = null;
+                    onTranscriptionSuccess(text, durationMs, recordingId);
+                    if (json.optBoolean("rejected", false)) FloatingPillOverlay.showSuccess("Other speaker rejected");
+                });
+            } catch (Exception e) {
+                final String feedback = DictationUpload.feedback(e);
+                mHandler.post(() -> {
+                    if (generation == mGeneration && sIsProcessing) failDictation(recordingId, feedback);
                 });
             }
         });
@@ -445,33 +413,70 @@ public class VoiceVaultService extends Service {
         cleanup();
     }
 
+    private void cancelTimers() {
+        if (mRecorderStartRunnable != null) mHandler.removeCallbacks(mRecorderStartRunnable);
+        if (mProcessingTimeoutRunnable != null) mHandler.removeCallbacks(mProcessingTimeoutRunnable);
+        if (mTimerRunnable != null) mHandler.removeCallbacks(mTimerRunnable);
+        mRecorderStartRunnable = null;
+        mProcessingTimeoutRunnable = null;
+        mTimerRunnable = null;
+    }
+
+    private void releaseRecorder() {
+        MediaRecorder recorder = mRecorder;
+        mRecorder = null;
+        boolean started = mRecorderStarted;
+        mRecorderStarted = false;
+        if (recorder == null) return;
+        if (started) {
+            try { recorder.stop(); } catch (Exception ignored) {}
+        }
+        try { recorder.release(); } catch (Exception ignored) {}
+    }
+
+    private void cancelUpload() {
+        DictationUpload upload = mUpload;
+        mUpload = null;
+        if (upload != null) {
+            upload.cancel();
+            mExecutor.execute(upload::disconnect);
+        }
+    }
+
+    private void failDictation(long recordingId, String feedback) {
+        ++mGeneration;
+        sIsRecording = false;
+        sIsProcessing = false;
+        VoiceVaultKeyService.onTranscriptionFinished(recordingId, null);
+        cancelUpload();
+        // Only fixed feedback categories are logged, never paths or response bodies.
+        Log.e(TAG, feedback);
+        FloatingPillOverlay.showSuccess(feedback);
+        Toast.makeText(this, feedback, Toast.LENGTH_LONG).show();
+        cleanup();
+    }
+
     private void cancelRecording() {
         mGeneration++;
         VoiceVaultKeyService.onTranscriptionFinished(sRecordingStartTime, null);
         sIsRecording = false;
         sIsProcessing = false;
-        if (mTimerRunnable != null) {
-            mHandler.removeCallbacks(mTimerRunnable);
-        }
-        try {
-            if (mRecorder != null) {
-                mRecorder.stop();
-                mRecorder.release();
-                mRecorder = null;
-            }
-            if (mCurrentAudioFile != null && mCurrentAudioFile.exists()) {
-                mCurrentAudioFile.delete();
-            }
-        } catch (Exception ignored) {}
+        cancelTimers();
+        releaseRecorder();
+        cancelUpload();
+        if (mCurrentAudioFile != null && mCurrentAudioFile.exists()) mCurrentAudioFile.delete();
+        mCurrentAudioFile = null;
         FloatingPillOverlay.dismiss();
         cleanup();
-        sendExplicitBroadcast(new Intent(BROADCAST_STATE_CHANGE));
     }
 
     private void cleanup() {
+        sIsRecording = false;
         sIsProcessing = false;
-        if (mWakeLock != null && mWakeLock.isHeld()) {
-            mWakeLock.release();
+        cancelTimers();
+        releaseRecorder();
+        if (mWakeLock != null) {
+            if (mWakeLock.isHeld()) mWakeLock.release();
             mWakeLock = null;
         }
         stopForeground(true);
@@ -493,6 +498,9 @@ public class VoiceVaultService extends Service {
     public void onDestroy() {
         mGeneration++;
         VoiceVaultKeyService.onTranscriptionFinished(sRecordingStartTime, null);
+        sIsRecording = false;
+        sIsProcessing = false;
+        cancelUpload();
         cleanup();
         mExecutor.shutdown();
         super.onDestroy();

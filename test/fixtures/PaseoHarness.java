@@ -56,7 +56,7 @@ public class PaseoHarness {
                 }
                 f.send.label = "Send message";
                 f.toolbar.children.remove(f.send); f.root.children.add(f.send);
-                check(PaseoSelection.submit(f.root, f.editor) == null); // global match at same bounds
+                check(PaseoSelection.submit(f.root, f.editor) == f.send); // wrapper export does not change the local action
                 f.root.children.remove(f.send); f.toolbar.children.add(f.send);
                 f.send.top -= 100 * scale; f.send.bottom -= 100 * scale;
                 check(PaseoSelection.submit(f.root, f.editor) == null); // above input, context area
@@ -78,7 +78,9 @@ public class PaseoHarness {
         f.root.children.add(other); check(PaseoSelection.submit(f.root, f.editor) == null);
         f.root.children.remove(other);
         f.root.children.removeAll(f.toolbar.children); f.root.children.add(f.send);
-        check(PaseoSelection.submit(f.root, f.editor) == null); // isolated global match is not a toolbar
+        check(PaseoSelection.submit(f.root, f.editor) == f.send); // optional peers do not identify the action
+        f.send.top += 100; f.send.bottom += 100;
+        check(PaseoSelection.submit(f.root, f.editor) == null); // unrelated distant action
     }
     static void flow() {
         Fixture f = new Fixture(420, 20, 1);
@@ -91,19 +93,19 @@ public class PaseoHarness {
         check(PaseoSelection.draftText(false, true, hint).equals(hint));
         PaseoSelection.Gate g = written("existing draft");
         f.editor.text = "existing draft"; // no unsolicited existing-draft prohibition
-        check(g.check(f.root, f.editor, expected, true, 0) == PaseoSelection.Status.WAIT);
+        check(g.check(f.root, f.editor, expected, true, false) == PaseoSelection.Status.WAIT);
         f.editor.text = PaseoSelection.draftText(true, true, hint);
-        check(g.check(f.root, f.editor, expected, true, 2) == PaseoSelection.Status.WAIT);
+        check(g.check(f.root, f.editor, expected, true, false) == PaseoSelection.Status.WAIT);
         check(!g.dispatch());
         f.editor.text = expected;
-        check(g.check(f.root, f.editor, expected, true, 5) == PaseoSelection.Status.SEND);
+        check(g.check(f.root, f.editor, expected, true, false) == PaseoSelection.Status.SEND);
         check(g.dispatch()); check(!g.dispatch());
-        check(g.check(f.root, f.editor, expected, true, 6) == PaseoSelection.Status.ABORT);
+        check(g.check(f.root, f.editor, expected, true, false) == PaseoSelection.Status.ABORT);
 
         f.send.enabled = false;
         g = written("");
-        check(g.check(f.root, f.editor, expected, true, 0) == PaseoSelection.Status.WAIT);
-        check(g.check(f.root, f.editor, expected, true, 7) == PaseoSelection.Status.MANUAL);
+        check(g.check(f.root, f.editor, expected, true, false) == PaseoSelection.Status.WAIT);
+        check(g.check(f.root, f.editor, expected, true, true) == PaseoSelection.Status.MANUAL);
         check(!g.dispatch());
         check("Inserted — send manually".equals(PaseoSelection.feedback(PaseoSelection.Status.MANUAL)));
         check(PaseoSelection.feedback(PaseoSelection.Status.ABORT) == null);
@@ -111,27 +113,27 @@ public class PaseoHarness {
         f.send.enabled = true;
         for (boolean reset : new boolean[] {false, true}) {
             g = written("");
-            check(g.check(f.root, f.editor, expected, true, 0) == PaseoSelection.Status.SEND);
+            check(g.check(f.root, f.editor, expected, true, false) == PaseoSelection.Status.SEND);
             f.editor.text = ""; // manual send/clear, including input identity lost on remount
             g.observe(reset ? null : f.editor, expected);
-            check(g.check(f.root, reset ? null : f.editor, expected, true, 1) == PaseoSelection.Status.ABORT);
+            check(g.check(f.root, reset ? null : f.editor, expected, true, false) == PaseoSelection.Status.ABORT);
             check(!g.dispatch());
             f.editor.text = expected; check(!g.dispatch()); // no resurrection
         }
         g = written(""); g.observe(f.editor, expected); f.editor.text = "user edit";
-        check(g.check(f.root, f.editor, expected, true, 1) == PaseoSelection.Status.ABORT);
+        check(g.check(f.root, f.editor, expected, true, false) == PaseoSelection.Status.ABORT);
         check(!g.dispatch());
         g = written(""); f.editor.text = "";
-        check(g.check(f.root, f.editor, expected, true, 7) == PaseoSelection.Status.UNCONFIRMED);
+        check(g.check(f.root, f.editor, expected, true, true) == PaseoSelection.Status.UNCONFIRMED);
         check(PaseoSelection.feedback(PaseoSelection.Status.UNCONFIRMED).contains("insertion unconfirmed"));
         g = written(""); g.cancel(); f.editor.text = expected;
-        check(g.check(f.root, f.editor, expected, true, 0) == PaseoSelection.Status.ABORT); check(!g.dispatch());
+        check(g.check(f.root, f.editor, expected, true, false) == PaseoSelection.Status.ABORT); check(!g.dispatch());
         g = written("");
-        check(g.check(f.root, f.editor, expected, false, 0) == PaseoSelection.Status.INSERTED); check(!g.dispatch());
+        check(g.check(f.root, f.editor, expected, false, false) == PaseoSelection.Status.INSERTED); check(!g.dispatch());
         g = written(""); f.editor.text = PaseoSelection.draftText(true, true, hint);
-        check(g.check(f.root, f.editor, hint, true, 0) == PaseoSelection.Status.WAIT);
+        check(g.check(f.root, f.editor, hint, true, false) == PaseoSelection.Status.WAIT);
         f.editor.text = PaseoSelection.draftText(true, false, hint);
-        check(g.check(f.root, f.editor, hint, true, 1) == PaseoSelection.Status.SEND); check(g.dispatch());
+        check(g.check(f.root, f.editor, hint, true, false) == PaseoSelection.Status.SEND); check(g.dispatch());
     }
     public static void main(String[] args) { selection(); flattenedNativeTree(); flow(); }
 }

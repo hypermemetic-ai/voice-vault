@@ -20,6 +20,7 @@ public class PaseoServiceHarness {
         void putCharSequence(String key, CharSequence v) { value=v; }
     }
     static class Build { static class VERSION { static int SDK_INT=34; } static class VERSION_CODES { static int O=26; } }
+    static class SystemClock { static long uptimeMillis() { return now/1000; } }
     static class Log { static void w(String tag, String msg, Throwable t) { throw new AssertionError(msg, t); } }
     static class FloatingPillOverlay {
         static void showFeedback(PaseoServiceHarness s, String msg, boolean b) { s.feedback=msg; }
@@ -96,6 +97,7 @@ public class PaseoServiceHarness {
     final PendingDictation mPendingDictation=new PendingDictation();
     AccessibilityNodeInfo root, editor, send, mPendingComposer, mFlowComposer;
     long mPendingPaseoId=-1; int mPaseoGeneration, mFlowWindow=-1, mPaseoAttempt;
+    long mPaseoDeadline; static final long PASEO_READY_TIMEOUT_MS=2000L;
     PaseoSelection.Gate mFlowGate; String mFlowExpected, mFlowPackage;
     Runnable mPaseoCheck; boolean mode=true, auto=true, reject;
     int echoDelay, focusDelay, childrenAtWrite, childrenAtClick; long idleAtWrite, idleAtClick; String feedback="sentinel";
@@ -196,10 +198,49 @@ public class PaseoServiceHarness {
         check(clicks==1 && clickAt<100000,"event wakes readiness before timer"); cases++;
         s=fixture(false,1000); final PaseoServiceHarness moved=s;
         s.send.onRefresh=()->moved.editor.bounds.bottom+=50; s.complete(); s.mKeyHandler.run(); check(clicks==0,"editor geometry changes before dispatch"); cases++;
-        s=fixture(true,1000); s.root.kids.removeIf(n->n.label.equals("Voice")); s.complete(); s.mKeyHandler.run(); check(clicks==0,"flattened isolated label not toolbar"); cases++;
+        s=fixture(true,1000); s.root.kids.removeIf(n->n.label.equals("Voice")); s.complete(); s.mKeyHandler.run(); check(clicks==1,"exact local send survives optional peer absence"); cases++;
         s=fixture(false,1000); AccessibilityNodeInfo duplicate=new AccessibilityNodeInfo(PaseoSelection.COMPOSER,24,428,376,452); duplicate.editable=true;
         s.root.kids.add(duplicate); s.pasteIntoPaseo(s.root,"replacement"); s.mKeyHandler.run(); check(writes==0,"clipboard ambiguous composer"); cases++;
         System.out.println("production-method regressions passed="+cases);
     }
-    public static void main(String[] args) { benchmark(args[0]); if(args[0].equals("after"))regressions(); }
+    static void autosendRegressions() {
+        PaseoServiceHarness s=fixture(false,0);
+        final PaseoServiceHarness resizing=s;
+        s.send.onRefresh=()-> {
+            resizing.editor.bounds.bottom+=50;
+            resizing.mKeyHandler.postDelayed(()-> {
+                AccessibilityNodeInfo toolbar=resizing.root.kids.get(1).kids.get(1);
+                toolbar.bounds.top+=50; toolbar.bounds.bottom+=50;
+                for(AccessibilityNodeInfo child:toolbar.kids) { child.bounds.top+=50; child.bounds.bottom+=50; }
+                resizing.root.kids.get(1).bounds.bottom+=50;
+            },50);
+        };
+        s.complete(); s.mKeyHandler.run();
+        check(writes==1 && clicks==1,"normal multiline layout must revalidate and send once");
+
+        s=fixture(false,0); s.send.enabled=false;
+        final PaseoServiceHarness rendering=s;
+        s.complete();
+        for(int i=1;i<=20;i++) {
+            s.mKeyHandler.postDelayed(()-> { if(rendering.mFlowComposer!=null) rendering.observePaseoFlow(); },i*10);
+        }
+        s.mKeyHandler.postDelayed(()->{rendering.send.enabled=true; if(rendering.mFlowComposer!=null) rendering.observePaseoFlow();},600);
+        s.mKeyHandler.run();
+        check(writes==1 && clicks==1,"content events must not exhaust readiness before React enables Send");
+
+        s=fixture(true,0);
+        final PaseoServiceHarness minimal=s;
+        s.root.kids.removeIf(n->n!=minimal.editor && n!=minimal.send && !n.label.equals("chat history"));
+        s.complete(); s.mKeyHandler.run();
+        check(writes==1 && clicks==1,"exact local send must not depend on optional toolbar peers");
+
+        s=fixture(false,0); s.send.enabled=false;
+        s.complete(); s.mKeyHandler.run();
+        check(clicks==0 && s.feedback.equals("Inserted — send manually"),"unavailable Send terminates without dispatch");
+        check(now>=2000000 && now<2300000,"readiness respects the real two-second budget");
+    }
+    public static void main(String[] args) {
+        if(args[0].equals("autosend")) { autosendRegressions(); return; }
+        benchmark(args[0]); if(args[0].equals("after"))regressions();
+    }
 }
