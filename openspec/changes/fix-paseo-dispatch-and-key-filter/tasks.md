@@ -6,4 +6,4 @@
 
 ## 2. Native verification and delivery
 
-- [ ] 2.1 Verify real keys and gestures against the offline native fixture, run hermetic regressions and strict spec validation, publish signed 1.2.17/code 21 with served-byte/signature checks and record native/device coverage limits; commit, push and merge scoped changes.
+- [x] 2.1 Verify real keys and gestures against the offline native fixture, run hermetic regressions and strict spec validation, publish signed 1.2.17/code 21 with served-byte/signature checks and record native/device coverage limits; commit, push and merge scoped changes.
