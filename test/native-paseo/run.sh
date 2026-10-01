@@ -27,6 +27,7 @@ SERIAL="${VV_EMULATOR_SERIAL:?Set VV_EMULATOR_SERIAL to an isolated, booted emul
 [[ "$SERIAL" == emulator-* ]] || { echo 'Refusing non-emulator target' >&2; exit 1; }
 ADB=("$SDK/platform-tools/adb" -s "$SERIAL")
 [[ "$("${ADB[@]}" shell getprop sys.boot_completed | tr -d '\r')" == 1 ]] || { echo 'Emulator not booted' >&2; exit 1; }
+[[ "$("${ADB[@]}" shell id -u | tr -d '\r')" == 0 ]] || { echo 'Offline hardware-key verification requires root adb on this isolated emulator' >&2; exit 1; }
 if "${ADB[@]}" shell pm path sh.paseo.debug | grep -q '^package:'; then
     echo 'Refusing to overwrite an existing Paseo/fixture package; use an isolated emulator.' >&2; exit 1
 fi
@@ -54,8 +55,8 @@ trap cleanup EXIT
 "${ADB[@]}" logcat -c
 # Bounded instrumentation and diagnostic logs; APK never enters public/release output.
 set +e
-timeout --kill-after=5s 240s "${ADB[@]}" shell am instrument -w sh.paseo.debug/ai.hypermemetic.voicevault.PaseoFixtureTest | tee "$BUILD/instrumentation.log"
-RESULT=${PIPESTATUS[0]}
+timeout --kill-after=5s 240s python3 "$ROOT/test/native-paseo/hardware-keys.py" "$SDK/platform-tools/adb" "$SERIAL" "$BUILD/instrumentation.log"
+RESULT=$?
 set -e
 "${ADB[@]}" logcat -d > "$BUILD/logcat.log"
 [[ "$RESULT" == 0 ]] && grep -q 'OK native cases=' "$BUILD/instrumentation.log"

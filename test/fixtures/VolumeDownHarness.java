@@ -9,17 +9,23 @@ public class VolumeDownHarness extends VolumeDownBase {
     boolean mode=true, auto=true;
     int insertions, toggles;
     private long mLastVolDownTime=-1;
+    private final VolumeUpTiming mVolDnTiming=new VolumeUpTiming();
+    private Runnable mPendingVolDnRunnable;
+    private boolean mConsumedUp, mConsumedDown;
+    private int mKeyGeneration;
     private final VolumeUpTiming mVolUpTiming=new VolumeUpTiming();
     private Runnable mPendingVolUpRunnable;
     private final Handler mKeyHandler=new Handler();
     boolean isDictationModeEnabled() { return mode; }
     void setDictationModeEnabled(boolean value) { mode=value; }
     void finishAndInsert() { insertions++; }
+    boolean isAutoSendEnabled() { return auto; }
+    void setAutoSendEnabled(boolean value) { auto=value; }
     void toggleDictation() { toggles++; }
     void stopRecordingService() {}
     void notifyTileStateChanged() {}
     void provideFeedback(boolean positive, String message) {}
-    void cancelPendingKeyCallbacks() { mLastVolDownTime=-1; mVolUpTiming.reset(); mKeyHandler.jobs.clear(); }
+    void cancelPendingKeyCallbacks() { mLastVolDownTime=-1; mVolUpTiming.reset(); mVolDnTiming.reset(); mKeyGeneration++; mPendingVolDnRunnable=null; mKeyHandler.jobs.clear(); }
 
     // PRODUCTION_KEY_EVENT
 
@@ -33,28 +39,34 @@ public class VolumeDownHarness extends VolumeDownBase {
     public static void main(String[] args) {
         VolumeDownHarness s=new VolumeDownHarness();
         s.down(0,KeyEvent.ACTION_DOWN,0);
-        check(s.insertions==1 && s.mKeyHandler.jobs.isEmpty(),"single Down inserts immediately");
+        check(s.insertions==0 && s.mKeyHandler.jobs.size()==1,"key filter returns before slow accessibility work");
         s.down(30,KeyEvent.ACTION_UP,0);
-        s.down(100,KeyEvent.ACTION_DOWN,0);
-        s.down(180,KeyEvent.ACTION_DOWN,5);
-        check(s.insertions==1 && s.auto,"double and repeat do not disable auto-send or insert twice");
-        s.down(220,KeyEvent.ACTION_DOWN,0);
-        check(s.insertions==2 && s.auto,"new intentional Down works after debounce");
-        s.auto=false; s.down(450,KeyEvent.ACTION_DOWN,0);
-        check(s.insertions==3 && !s.auto,"explicit insertion-only setting preserved");
-        s.mode=false;
-        SystemClock.now=700;
+        s.mKeyHandler.run();
+        check(s.insertions==1,"single Down inserts after double window");
+        s.down(300,KeyEvent.ACTION_DOWN,0); s.down(330,KeyEvent.ACTION_UP,0);
+        s.down(400,KeyEvent.ACTION_DOWN,0); s.down(430,KeyEvent.ACTION_UP,0);
+        s.mKeyHandler.run();
+        check(s.insertions==1 && !s.auto,"double Down toggles off without insertion");
+        s.down(800,KeyEvent.ACTION_DOWN,0); s.down(820,KeyEvent.ACTION_UP,0);
+        s.down(900,KeyEvent.ACTION_DOWN,0); s.down(930,KeyEvent.ACTION_UP,0);
+        s.mKeyHandler.run();
+        check(s.insertions==1 && s.auto,"double Down toggles back on");
+        s.down(1200,KeyEvent.ACTION_DOWN,0); s.down(1300,KeyEvent.ACTION_DOWN,5); s.down(1400,KeyEvent.ACTION_UP,0);
+        s.mKeyHandler.run(); check(s.insertions==2 && s.auto,"held repeat never toggles");
+        s.down(1600,KeyEvent.ACTION_DOWN,0); s.mode=false;
+        s.down(1610,KeyEvent.ACTION_UP,0);
+        s.cancelPendingKeyCallbacks(); s.mKeyHandler.run(); check(s.insertions==2,"mode change cancels queued insertion and consumes original release");
         check(!s.onKeyEvent(new KeyEvent(KeyEvent.KEYCODE_VOLUME_DOWN,KeyEvent.ACTION_DOWN,0)),"inactive Down passes through");
-        check(s.insertions==3,"inactive mode does not insert");
-        s.cancelPendingKeyCallbacks(); s.mode=true; s.down(701,KeyEvent.ACTION_DOWN,0);
-        check(s.insertions==4,"mode change resets debounce");
+
     }
     static class SystemClock { static long now; static long uptimeMillis() { return now; } }
     static class Log { static void i(String tag,String message) {} }
     static class VoiceVaultService { static boolean isRecording() { return false; } }
     static class Handler {
         final List<Runnable> jobs=new ArrayList<>();
+        void post(Runnable r) { jobs.add(r); }
         void postDelayed(Runnable r,long delay) { jobs.add(r); }
+        void run() { while(!jobs.isEmpty()) jobs.remove(0).run(); }
         void removeCallbacks(Runnable r) { jobs.remove(r); }
     }
     static class KeyEvent {

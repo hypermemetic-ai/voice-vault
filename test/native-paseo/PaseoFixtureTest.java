@@ -74,13 +74,23 @@ public class PaseoFixtureTest extends Instrumentation {
         }
     }
     void result(String name, int clicks, String feedback) throws Exception {
-        check(activity.clicks == clicks, name + " clicks=" + activity.clicks);
+        check(activity.clicks == clicks, name + " clicks=" + activity.clicks + " writes=" + activity.writes + " touch=" + activity.touchDowns + " clickActions=" + activity.clickActions + " feedback=" + feedback());
         check(activity.writes == 1, name + " writes=" + activity.writes);
-        check(activity.clickActions <= 1, name + " repeated native dispatch=" + activity.clickActions);
+        check(activity.touchDowns + activity.clickActions <= 1, name + " repeated native dispatch=" + activity.clickActions);
         check(feedback.equals(feedback()), name + " feedback=" + feedback());
         check(field(VoiceVaultKeyService.class, "mFlowComposer", service) == null, name + " flow still pending");
         cases++; report("PASS " + name + " writes=" + activity.writes + " nativeClickActions=" + activity.clickActions
-                + " mockClicks=" + activity.clicks + " feedback=" + feedback());
+                + " touchDowns=" + activity.touchDowns + " mockClicks=" + activity.clicks + " feedback=" + feedback());
+    }
+    static void setStatic(Class<?> cls,String name,Object value) throws Exception {
+        Field f=cls.getDeclaredField(name); f.setAccessible(true); f.set(null,value);
+    }
+    void key(int code) { hardwareKeys(code, 1); }
+    void hardwareKeys(int code, int count) {
+        // UiAutomation injection bypasses Android's hardware accessibility filter.
+        // The host runner sends actual emulator EV_KEY events in response.
+        report("HARDWARE_KEY " + code + " " + count);
+        pause(300);
     }
     @Override public void onCreate(Bundle args) { super.onCreate(args); start(); }
     @Override public void onStart() {
@@ -109,14 +119,14 @@ public class PaseoFixtureTest extends Instrumentation {
                     setup(label, multiline, true, false, 0, keyboard); dump(name);
                     String text = multiline ? "offline dictation\nline two" : "offline dictation";
                     begin(text); pause(1300);
-                    result(name, 1, "Sentinel");
+                    result(name, 1, "Submitted to Paseo");
                     check(text.equals(activity.submitted), "wrong submitted text");
-                    check(activity.clickActions == 1, "not a native ACTION_CLICK");
+                    check(activity.touchDowns == 1 && activity.clickActions == 0, "not one native touch");
                 }
             setup("Send message", false, true, false, 300, false);
             main(() -> activity.editor.setText("existing draft")); pause(200);
             begin("replacement"); pause(200); check(activity.clicks == 0, "clicked before exact delayed echo");
-            pause(1100); result("delayed echo replaces existing draft", 1, "Sentinel");
+            pause(1100); result("delayed echo replaces existing draft", 1, "Submitted to Paseo");
             for (String kind : new String[] {"disabled", "ambiguous", "context only"}) {
                 setup(kind.equals("context only") ? "Context window 50% used" : "Send message", false,
                         !kind.equals("disabled"), kind.equals("ambiguous"), 0, false);
@@ -130,24 +140,56 @@ public class PaseoFixtureTest extends Instrumentation {
             main(() -> service.getSharedPreferences("voice_vault_prefs", 0).edit().putBoolean("pref_auto_send_on_paste", true).commit());
             // Manual action/remount before echo: poll can see the remount before its
             // queued accessibility event. Native object identity must still cancel.
-            setup("Send message", false, true, false, 300, false); begin("pending"); pause(120);
-            manualTap(); pause(1300); result("manual send remount", 1, "Sentinel");
+            setup("Send message", false, true, false, 1200, false); begin("pending"); pause(80);
+            check(activity.editor.getText().length()==0,"manual test must precede echo");
+            manualTap(); pause(1600); result("manual send remount", 1, "Auto-send canceled");
             check(activity.clickActions == 0, "automation clicked after manual submission");
             setup("Send message", false, false, false, 0, false); begin("pending"); pause(220);
-            main(() -> activity.editor.setText("")); pause(1200); result("manual clear after echo", 0, "Sentinel");
+            main(() -> activity.editor.setText("")); pause(1200); result("manual clear after echo", 0, "Auto-send canceled");
             setup("Send message", false, true, false, 300, false); begin("pending"); pause(120);
-            main(() -> activity.installEditor("")); pause(1300); result("navigation/remount", 0, "Sentinel");
+            main(() -> activity.installEditor("")); pause(1300); result("navigation/remount", 0, "Auto-send canceled");
             setup("Send message", false, false, false, 0, false); begin("pending"); pause(220);
-            main(() -> activity.editor.setText("user edited")); pause(1200); result("manual edit after echo", 0, "Sentinel");
+            main(() -> activity.editor.setText("user edited")); pause(1200); result("manual edit after echo", 0, "Auto-send canceled");
             setup("Send message", false, true, false, 0, false);
             main(() -> activity.rejectClick = true); begin("inserted"); pause(1300);
-            result("rejected native click never retried", 0, "Inserted — send manually");
-            check(activity.clickActions == 1, "failed action was not attempted exactly once");
+            result("ineffective accessibility click bypassed by touch", 1, "Submitted to Paseo");
+            check(activity.clickActions == 0 && activity.touchDowns == 1, "one physical tap required");
+            setup("Send message", false, true, false, 0, false);
+            main(() -> activity.ignoreTouch = true); begin("inserted"); pause(1800);
+            result("ineffective native tap never retried", 0, "Send not confirmed — tap Send");
+            check(activity.touchDowns == 1, "must attempt touch exactly once");
             setup("Send message", false, true, false, 0, false); begin(PaseoSelection.COMPOSER); pause(1300);
-            result("literal placeholder text is real echo", 1, "Sentinel");
+            result("literal placeholder text is real echo", 1, "Submitted to Paseo");
             check(PaseoSelection.COMPOSER.equals(activity.submitted), "literal hint lost");
             setup("Send message", false, true, false, 5000, false); begin("not echoed"); pause(2300);
             result("unconfirmed insertion", 0, "Copied — insertion unconfirmed; paste manually");
+            // Real key events, not direct invocation of onKeyEvent. Offline clipboard only.
+            setup("Send message", false, true, false, 0, false);
+            main(() -> ((android.content.ClipboardManager) activity.getSystemService(android.content.Context.CLIPBOARD_SERVICE))
+                .setPrimaryClip(android.content.ClipData.newPlainText("offline", "native key submit")));
+            pause(500);
+            android.media.AudioManager audio = (android.media.AudioManager) activity.getSystemService(android.content.Context.AUDIO_SERVICE);
+            int[] streams = {android.media.AudioManager.STREAM_MUSIC, android.media.AudioManager.STREAM_RING,
+                android.media.AudioManager.STREAM_NOTIFICATION, android.media.AudioManager.STREAM_ALARM, android.media.AudioManager.STREAM_SYSTEM};
+            int[] beforeVolumes = new int[streams.length];
+            for(int i=0;i<streams.length;i++) beforeVolumes[i]=audio.getStreamVolume(streams[i]);
+            key(android.view.KeyEvent.KEYCODE_VOLUME_DOWN); pause(1600);
+            result("real single Down inserts and submits", 1, "Submitted to Paseo");
+            for(int i=0;i<streams.length;i++) check(beforeVolumes[i]==audio.getStreamVolume(streams[i]), "Down leaked to volume stream " + streams[i]);
+            setup("Send message", false, true, false, 0, false);
+            hardwareKeys(android.view.KeyEvent.KEYCODE_VOLUME_DOWN,2); pause(450);
+            check(!service.getSharedPreferences("voice_vault_prefs",0).getBoolean("pref_auto_send_on_paste",true), "double Down did not disable");
+            check(activity.writes==0 && "Auto-send: OFF".equals(feedback()), "double Down inserted or failed to show OFF"); cases++; report("PASS real double Down OFF no write");
+            hardwareKeys(android.view.KeyEvent.KEYCODE_VOLUME_DOWN,2); pause(450);
+            check(service.getSharedPreferences("voice_vault_prefs",0).getBoolean("pref_auto_send_on_paste",false), "double Down did not enable");
+            check(activity.writes==0 && "Auto-send: ON".equals(feedback()), "double Down inserted or failed to show ON"); cases++; report("PASS real double Down ON no write");
+            // A completion while Down is waiting on Processing, without a recorder/network.
+            setup("Send message", false, true, false, 0, true);
+            main(() -> { try { setStatic(VoiceVaultService.class,"sIsProcessing",true); setStatic(VoiceVaultService.class,"sRecordingStartTime",42L); } catch(Exception e) { throw new RuntimeException(e); } });
+            key(android.view.KeyEvent.KEYCODE_VOLUME_DOWN); pause(350);
+            main(() -> VoiceVaultKeyService.onTranscriptionFinished(42,"offline completion"));
+            main(() -> { try { setStatic(VoiceVaultService.class,"sIsProcessing",false); } catch(Exception e) { throw new RuntimeException(e); } });
+            pause(1600); result("real Down waits for completion and submits",1,"Submitted to Paseo");
             finalResult.putString("stream", "OK native cases=" + cases + "; no network permission, mock handler only\n");
             finish(ActivityResult.OK, finalResult);
         } catch (Throwable t) {

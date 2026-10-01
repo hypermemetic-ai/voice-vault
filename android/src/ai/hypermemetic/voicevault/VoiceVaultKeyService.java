@@ -1,6 +1,8 @@
 package ai.hypermemetic.voicevault;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
+import android.graphics.Path;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
@@ -39,7 +41,7 @@ import java.util.Locale;
  *       <li>Single Volume Up: toggles recording (start/stop + Whisper transcription).</li>
  *       <li>Double-press Volume Up: disables Dictation Mode.</li>
  *       <li>Single Volume Down: stops/waits for transcription, then inserts (and auto-sends if enabled).</li>
- *       <li>Auto-send is controlled by the dashboard checkbox; repeated Down presses are debounced.</li>
+ *       <li>Double Volume Down toggles auto-send; the dashboard checkbox shows the same setting.</li>
  *     </ul>
  *     Both keys are consumed so the system volume never changes.
  *   </li>
@@ -60,7 +62,10 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
     private final Handler mKeyHandler = new Handler(Looper.getMainLooper());
     private final VolumeUpTiming mVolUpTiming = new VolumeUpTiming();
-    private long mLastVolDownTime = -1;
+    private final VolumeUpTiming mVolDnTiming = new VolumeUpTiming();
+    private Runnable mPendingVolDnRunnable;
+    private boolean mConsumedUp, mConsumedDown;
+    private int mKeyGeneration;
     private Runnable mPendingVolUpRunnable = null;
     private final PendingDictation mPendingDictation = new PendingDictation();
     private AccessibilityNodeInfo mPendingComposer;
@@ -73,6 +78,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private String mFlowPackage;
     private Runnable mPaseoCheck;
     private long mPaseoDeadline;
+    private boolean mFlowDispatched;
     private static final long PASEO_READY_TIMEOUT_MS = 2000L;
     private SharedPreferences mModePrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener mModeListener = (prefs, key) -> {
@@ -128,7 +134,10 @@ public class VoiceVaultKeyService extends AccessibilityService {
         clearFlowComposer();
         mPendingDictation.cancel();
         mVolUpTiming.reset();
-        mLastVolDownTime = -1;
+        mVolDnTiming.reset();
+        mKeyGeneration++;
+        if (mPendingVolDnRunnable != null) mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
+        mPendingVolDnRunnable = null;
         if (mPendingVolUpRunnable != null) {
             mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
             mPendingVolUpRunnable = null;
@@ -207,6 +216,11 @@ public class VoiceVaultKeyService extends AccessibilityService {
             return super.onKeyEvent(event);
         }
 
+        if (event.getAction() == KeyEvent.ACTION_UP) {
+            boolean consumed = keyCode == KeyEvent.KEYCODE_VOLUME_UP ? mConsumedUp : mConsumedDown;
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) mConsumedUp = false; else mConsumedDown = false;
+            if (consumed) return true;
+        }
         boolean dictationActive = isDictationModeEnabled();
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() > 0) {
             return dictationActive || super.onKeyEvent(event);
@@ -224,7 +238,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
                         setDictationModeEnabled(true);
                         notifyTileStateChanged();
                         provideFeedback(true, "Dictation Mode: ON");
-                        return true; // Consume second press
+                        mConsumedUp = true;
+                        return true; // Consume second press and its release
                     } else {
                         return super.onKeyEvent(event);
                     }
@@ -241,6 +256,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
         }
 
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) mConsumedUp = true; else mConsumedDown = true;
             if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
                 VolumeUpTiming.ActivePress press = mVolUpTiming.activePress(SystemClock.uptimeMillis());
                 if (press == VolumeUpTiming.ActivePress.DOUBLE) {
@@ -279,10 +295,36 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 mKeyHandler.postDelayed(single, VolumeUpTiming.UP_WINDOW_MS + 1);
                 return true;
             } else if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-                long now = SystemClock.uptimeMillis();
-                if (mLastVolDownTime >= 0 && now - mLastVolDownTime < VolumeUpTiming.UP_WINDOW_MS) return true;
-                mLastVolDownTime = now;
-                finishAndInsert();
+                VolumeUpTiming.ActivePress press = mVolDnTiming.activePress(SystemClock.uptimeMillis());
+                if (press == VolumeUpTiming.ActivePress.DOUBLE) {
+                    mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
+                    mPendingVolDnRunnable = null;
+                    final int generation = mKeyGeneration;
+                    mKeyHandler.post(() -> {
+                        if (generation != mKeyGeneration || !isDictationModeEnabled()) return;
+                        boolean enabled = !isAutoSendEnabled();
+                        setAutoSendEnabled(enabled);
+                        provideFeedback(enabled, "Auto-send: " + (enabled ? "ON" : "OFF"));
+                    });
+                    return true;
+                }
+                if (press == VolumeUpTiming.ActivePress.EXPIRED_FIRST) {
+                    mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
+                    final int generation = mKeyGeneration;
+                    mKeyHandler.post(() -> {
+                        if (generation == mKeyGeneration && isDictationModeEnabled()) finishAndInsert();
+                    });
+                }
+                Runnable single = new Runnable() {
+                    @Override public void run() {
+                        if (mPendingVolDnRunnable != this) return;
+                        mPendingVolDnRunnable = null;
+                        mVolDnTiming.activeSingleFinished();
+                        if (isDictationModeEnabled()) finishAndInsert();
+                    }
+                };
+                mPendingVolDnRunnable = single;
+                mKeyHandler.postDelayed(single, VolumeUpTiming.UP_WINDOW_MS + 1);
                 return true;
             }
         }
@@ -435,21 +477,14 @@ public class VoiceVaultKeyService extends AccessibilityService {
         List<AccessibilityWindowInfo> windows = getWindows();
         if (windows == null) return root;
         try {
-            boolean imeActive = false;
+            // The active accessibility window can be our pill, a system popup,
+            // or the IME. Always prefer the actual focused application window.
             for (AccessibilityWindowInfo window : windows) {
-                if (root != null && window.getId() == root.getWindowId()
-                        && window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
-                    imeActive = true;
-                }
-            }
-            if (root == null || imeActive) {
-                for (AccessibilityWindowInfo window : windows) {
-                    if (window.getType() == AccessibilityWindowInfo.TYPE_APPLICATION && window.isFocused()) {
-                        AccessibilityNodeInfo candidate = window.getRoot();
-                        if (candidate != null) {
-                            if (root != null) root.recycle();
-                            return candidate;
-                        }
+                if (window.getType() == AccessibilityWindowInfo.TYPE_APPLICATION && window.isFocused()) {
+                    AccessibilityNodeInfo candidate = window.getRoot();
+                    if (candidate != null) {
+                        if (root != null) root.recycle();
+                        return candidate;
                     }
                 }
             }
@@ -640,6 +675,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
         mFlowWindow = -1;
         mFlowPackage = null;
         mPaseoDeadline = 0;
+        mFlowDispatched = false;
         if (mPaseoCheck != null) mKeyHandler.removeCallbacks(mPaseoCheck);
         mPaseoCheck = null;
     }
@@ -782,6 +818,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             }
             // Check exact accessibility echo immediately; delayed RN readiness is
             // event-driven with a single bounded fallback timer, not mandatory sleep.
+            FloatingPillOverlay.showFeedback(this, isAutoSendEnabled() ? "Inserted — finding Send" : "Inserted — auto-send OFF", false);
             checkPaseo(generation, pkg, window, expected);
         } catch (Throwable t) {
             Log.w(TAG, "Paseo insertion failed", t); paseoFeedback("Copied — insertion uncertain");
@@ -790,6 +827,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
     private void checkPaseo(int generation, String pkg, int window, String expected) {
         if (generation != mPaseoGeneration) return;
+        if (mFlowDispatched) { confirmPaseo(generation, pkg, window, expected); return; }
         AccessibilityNodeInfo root = getApplicationRoot();
         boolean retry = false;
         try {
@@ -802,8 +840,11 @@ public class VoiceVaultKeyService extends AccessibilityService {
             boolean needToolbar = expected.equals(fresh.text) && isAutoSendEnabled();
             Rect band = new Rect(fresh.left, fresh.top, fresh.right, rootBoundsBottom(root));
             try (PaseoTree tree = needToolbar ? new PaseoTree(root, band) : null) {
-                PaseoSelection.Node editor = tree == null ? fresh : PaseoSelection.composer(tree.root);
-                if (editor == null || !mFlowComposer.equals(editor.handle)) { cancelPaseoFlow(); return; }
+                // getChild() may return Android's cached pre-SET_TEXT editor even
+                // after saved.refresh() observes the new text. Only the refreshed,
+                // focused native identity is authoritative for draft and geometry;
+                // the tree is used solely to discover the local submit control.
+                PaseoSelection.Node editor = fresh;
                 PaseoSelection.Status state = mFlowGate.check(tree == null ? null : tree.root, editor, expected,
                         needToolbar, SystemClock.uptimeMillis() >= mPaseoDeadline);
                 if (state == PaseoSelection.Status.ABORT) {
@@ -835,10 +876,16 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     }
                     // Consume before dispatch; action return or later UI state must never trigger a retry.
                     if (!mFlowGate.dispatch()) { cancelPaseoFlow(); return; }
-                    mPaseoGeneration++;
-                    clearFlowComposer();
-                    boolean accepted = target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    mFlowDispatched = true;
+                    mPaseoDeadline = SystemClock.uptimeMillis() + 1500L;
+                    FloatingPillOverlay.showFeedback(this, "Sending to Paseo…", false);
+                    boolean accepted = tapPaseo(target, generation);
+                    if (!accepted) {
+                        // A rejected gesture queues no touch; only then try the exact native action once.
+                        accepted = target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    }
                     if (!accepted) paseoFeedback("Inserted — send manually");
+                    else schedulePaseoCheck(generation, pkg, window, expected, 100);
                     return;
                 }
             }
@@ -849,6 +896,46 @@ public class VoiceVaultKeyService extends AccessibilityService {
             return;
         } finally { if (root != null) root.recycle(); }
         if (retry) schedulePaseoCheck(generation, pkg, window, expected, 100);
+    }
+
+    /** One touch, only at the freshly validated exact control. No blind coordinates or retries. */
+    private boolean tapPaseo(AccessibilityNodeInfo target, int generation) {
+        Rect bounds = new Rect(); target.getBoundsInScreen(bounds);
+        Path path = new Path(); path.moveTo((bounds.left + bounds.right) / 2f, (bounds.top + bounds.bottom) / 2f);
+        GestureDescription gesture = new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 60)).build();
+        return dispatchGesture(gesture, new GestureResultCallback() {
+            @Override public void onCancelled(GestureDescription gesture) {
+                if (generation == mPaseoGeneration && mFlowDispatched) paseoFeedback("Send canceled — tap Send");
+            }
+        }, mKeyHandler);
+    }
+
+    /** Native composer reset is evidence of local submission, never of server acceptance. */
+    private void confirmPaseo(int generation, String pkg, int window, String expected) {
+        AccessibilityNodeInfo root = getApplicationRoot();
+        try {
+            if (!validPaseo(generation, pkg, window, root)) { cancelPaseoFlow(); return; }
+            PaseoSelection.Node editor = currentComposer(root, mFlowComposer);
+            if (editor == null) {
+                try (PaseoTree tree = new PaseoTree(root)) {
+                    PaseoSelection.Node candidate = PaseoSelection.composer(tree.root);
+                    AccessibilityNodeInfo handle = candidate == null ? null : (AccessibilityNodeInfo) candidate.handle;
+                    editor = handle != null && handle.refresh() ? PaseoTree.describe(handle) : null;
+                }
+            }
+            if (editor != null && editor.text.isEmpty()) { paseoFeedback("Submitted to Paseo"); return; }
+            if (editor != null && !expected.equals(editor.text)) { cancelPaseoFlow(); return; }
+            // A normal submit tears down the old editor before its replacement
+            // is exported. Wait within the confirmation budget; never resend.
+
+            if (SystemClock.uptimeMillis() >= mPaseoDeadline) {
+                paseoFeedback("Send not confirmed — tap Send"); return;
+            }
+            schedulePaseoCheck(generation, pkg, window, expected, 100);
+        } catch (Throwable t) {
+            paseoFeedback("Send not confirmed — tap Send");
+        } finally { if (root != null) root.recycle(); }
     }
 
     private static int rootBoundsBottom(AccessibilityNodeInfo root) {
@@ -870,7 +957,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
         if (generation != mPaseoGeneration || mFlowGate == null) return;
         long remaining = mPaseoDeadline - SystemClock.uptimeMillis();
         if (remaining <= 0) {
-            paseoFeedback(PaseoSelection.feedback(mFlowGate.hasEcho()
+            paseoFeedback(mFlowDispatched ? "Send not confirmed — tap Send" : PaseoSelection.feedback(mFlowGate.hasEcho()
                     ? PaseoSelection.Status.MANUAL : PaseoSelection.Status.UNCONFIRMED));
             return;
         }
@@ -883,8 +970,9 @@ public class VoiceVaultKeyService extends AccessibilityService {
     }
 
     private void cancelPaseoFlow() {
+        boolean dispatched = mFlowDispatched;
         mPaseoGeneration++;
-        clearFlowComposer();
+        paseoFeedback(dispatched ? "Send not confirmed — check Paseo" : "Auto-send canceled");
     }
 
     /** Observe fresh native identity/text, not a stale event payload or path/bounds. */
@@ -894,6 +982,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (!validPaseo(mPaseoGeneration, mFlowPackage, mFlowWindow, root)) {
                 cancelPaseoFlow(); return;
             }
+            if (mFlowDispatched) { confirmPaseo(mPaseoGeneration, mFlowPackage, mFlowWindow, mFlowExpected); return; }
             mFlowGate.observe(currentComposer(root, mFlowComposer), mFlowExpected);
             if (mFlowGate.isCanceled()) { cancelPaseoFlow(); return; }
             // Coalesce bursts; observation itself never walks history or toolbar.
@@ -944,6 +1033,10 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
 
         return clipText;
+    }
+
+    private void setAutoSendEnabled(boolean enabled) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(PREF_AUTO_SEND, enabled).apply();
     }
 
     private boolean isAutoSendEnabled() {
@@ -1098,14 +1191,15 @@ public class VoiceVaultKeyService extends AccessibilityService {
         int type = event.getEventType();
         String pkg = event.getPackageName() == null ? null : event.getPackageName().toString();
         if (mFlowComposer != null && !"com.android.systemui".equals(pkg)) {
-            if (type == AccessibilityEvent.TYPE_VIEW_CLICKED || type == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            if (!mFlowDispatched && PaseoSelection.isPaseo(pkg) && type == AccessibilityEvent.TYPE_VIEW_CLICKED) {
                 AccessibilityNodeInfo source = event.getSource();
                 try {
                     if (source == null || !mFlowComposer.equals(source)) cancelPaseoFlow();
                 } finally { if (source != null) source.recycle(); }
             } else if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
                     || (PaseoSelection.isPaseo(pkg) && (type == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
-                        || type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED))) {
+                        || type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                        || type == AccessibilityEvent.TYPE_VIEW_SCROLLED))) {
                 // Keyboard window changes are harmless if the application's exact
                 // composer still exists; manual clears/remounts/navigation are not.
                 observePaseoFlow();
@@ -1125,12 +1219,17 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 }
             } finally { if (source != null) source.recycle(); }
         }
-        if ((type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-                || (type == AccessibilityEvent.TYPE_VIEW_SCROLLED && PaseoSelection.isPaseo(pkg)))
+        if ((type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || type == AccessibilityEvent.TYPE_VIEW_SCROLLED)
                 && mPendingDictation.isPending() && !"com.android.systemui".equals(pkg)) {
-            mPendingDictation.cancel();
-            clearPendingComposer();
-            mPendingPaseoId = -1;
+            AccessibilityNodeInfo root = getApplicationRoot();
+            try {
+                String target = root == null || root.getPackageName() == null ? null : root.getPackageName().toString();
+                boolean valid = root != null && mPendingDictation.matchesWindow(target, root.getWindowId());
+                if (valid && PaseoSelection.isPaseo(target)) valid = currentComposer(root, mPendingComposer) != null;
+                if (!valid) {
+                    mPendingDictation.cancel(); clearPendingComposer(); mPendingPaseoId = -1;
+                }
+            } finally { if (root != null) root.recycle(); }
         }
     }
 

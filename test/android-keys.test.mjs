@@ -24,25 +24,15 @@ test("Up and Down 220ms uptime deadlines, delayed handlers, repeats and mode tra
   }
 });
 
-test("key service debounces Down without toggling auto-send and clears key state on mode changes", () => {
+test("key service queues Down work, restores double-toggle, and clears pending shortcuts", () => {
   const source = fs.readFileSync(path.join(java, "VoiceVaultKeyService.java"), "utf8");
-  assert.match(source, /mVolUpTiming\.inactivePress\(now\)/);
-  assert.match(source, /mVolUpTiming\.activePress\(SystemClock\.uptimeMillis\(\)\)/);
-  assert.match(source, /ActivePress\.EXPIRED_FIRST[\s\S]*?removeCallbacks\(mPendingVolUpRunnable\)[\s\S]*?toggleDictation\(\)/);
-  assert.match(source, /postDelayed\(single, VolumeUpTiming\.UP_WINDOW_MS \+ 1\)/);
-  assert.match(source, /mLastVolDownTime >= 0 && now - mLastVolDownTime < VolumeUpTiming\.UP_WINDOW_MS/);
-  assert.match(source, /mLastVolDownTime = now;\s*finishAndInsert\(\)/);
-  assert.doesNotMatch(source, /mVolDnTiming|mPendingVolDnRunnable|setAutoSendEnabled/);
-  assert.equal([...source.matchAll(/postDelayed\(single, VolumeUpTiming\.UP_WINDOW_MS \+ 1\)/g)].length, 1);
-  assert.doesNotMatch(source, /DOWN_WINDOW_MS/);
-  assert.match(source, /PREF_DICTATION_MODE\.equals\(key\)\) \{\s*cancelPendingKeyCallbacks\(\)/);
-  assert.match(source, /void cancelPendingKeyCallbacks\(\) \{[\s\S]*?mVolUpTiming\.reset\(\);\s*mLastVolDownTime = -1/);
-  for (const hook of ["onServiceConnected", "onUnbind", "onDestroy", "onInterrupt"]) {
-    assert.match(source, new RegExp(`${hook}\\([^)]*\\)[\\s\\S]*?cancelPendingKeyCallbacks\\(\\)`));
-  }
+  assert.match(source, /mVolDnTiming\.activePress/);
+  assert.match(source, /mPendingVolDnRunnable = single/);
+  assert.match(source, /setAutoSendEnabled\(enabled\)/);
+  assert.match(source, /mVolDnTiming\.reset\(\)/);
 });
 
-test("production key events make Down immediate, debounce repeats, and preserve auto-send preference", () => {
+test("production key events return promptly, defer singles, restore double-toggle and consume releases", () => {
   const classes = fs.mkdtempSync(path.join(os.tmpdir(), "voice-vault-down-"));
   try {
     const source = fs.readFileSync(path.join(java, "VoiceVaultKeyService.java"), "utf8");

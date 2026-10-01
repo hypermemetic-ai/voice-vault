@@ -21,7 +21,7 @@ public class PaseoServiceHarness {
     }
     static class Build { static class VERSION { static int SDK_INT=34; } static class VERSION_CODES { static int O=26; } }
     static class SystemClock { static long uptimeMillis() { return now/1000; } }
-    static class Log { static void w(String tag, String msg, Throwable t) { throw new AssertionError(msg, t); } }
+    static class Log { static void i(String tag,String msg,Throwable t) {} static void w(String tag, String msg, Throwable t) { throw new AssertionError(msg, t); } }
     static class FloatingPillOverlay {
         static void showFeedback(PaseoServiceHarness s, String msg, boolean b) { s.feedback=msg; }
     }
@@ -46,7 +46,9 @@ public class PaseoServiceHarness {
         String label, text="", pkg="sh.paseo.debug";
         Rect bounds; boolean editable, focused, visible=true, enabled=true, clickable=true, hint, alive=true;
         int window=1; List<AccessibilityNodeInfo> kids=new ArrayList<>();
-        PaseoServiceHarness owner; Runnable onRefresh;
+        PaseoServiceHarness owner; Runnable onRefresh; AccessibilityNodeInfo identity;
+        @Override public boolean equals(Object obj) { if(!(obj instanceof AccessibilityNodeInfo)) return false; AccessibilityNodeInfo b=(AccessibilityNodeInfo)obj; return (identity==null?this:identity)==(b.identity==null?b:b.identity); }
+        @Override public int hashCode() { return System.identityHashCode(identity==null?this:identity); }
         AccessibilityNodeInfo(String label, int l, int t, int r, int b) { this.label=label; bounds=new Rect(l,t,r,b); }
         static AccessibilityNodeInfo obtain(AccessibilityNodeInfo n) { return n; }
         void recycle() {}
@@ -56,7 +58,13 @@ public class PaseoServiceHarness {
         CharSequence getContentDescription() { return label; } CharSequence getHintText() { return null; }
         CharSequence getText() { return text; } boolean isShowingHintText() { return hint; }
         int getChildCount() { return kids.size(); }
-        AccessibilityNodeInfo getChild(int i) { children++; now+=IPC; return kids.get(i); }
+        AccessibilityNodeInfo getChild(int i) { children++; now+=IPC; AccessibilityNodeInfo n=kids.get(i);
+            if(n.editable && n.owner!=null && n.owner.staleCache && writes>0) {
+                AccessibilityNodeInfo copy=new AccessibilityNodeInfo(n.label,n.bounds.left,n.bounds.top,n.bounds.right,n.bounds.bottom);
+                copy.identity=n; copy.editable=true; copy.text="existing draft"; copy.owner=n.owner;
+                return copy;
+            }
+            return n; }
         String getPackageName() { return pkg; } int getWindowId() { return window; }
         boolean isFocused() { return focused; }
         boolean refresh() { refreshes++; now+=IPC; if (onRefresh!=null) { Runnable r=onRefresh; onRefresh=null; r.run(); } return alive; }
@@ -81,7 +89,7 @@ public class PaseoServiceHarness {
                 else if(owner.echoDelay>0) owner.mKeyHandler.postDelayed(() -> { text=value; hint=false; owner.observePaseoFlow(); },owner.echoDelay);
                 return true;
             }
-            if (action==ACTION_CLICK) { clicks++; clickAt=now; owner.childrenAtClick=children; owner.idleAtClick=timerIdle; return !owner.reject; }
+            if (action==ACTION_CLICK) { clicks++; clickAt=now; owner.childrenAtClick=children; owner.idleAtClick=timerIdle; if(!owner.reject && !owner.neverReset) owner.editor.text=""; return !owner.reject; }
             return false;
         }
     }
@@ -99,13 +107,26 @@ public class PaseoServiceHarness {
     long mPendingPaseoId=-1; int mPaseoGeneration, mFlowWindow=-1, mPaseoAttempt;
     long mPaseoDeadline; static final long PASEO_READY_TIMEOUT_MS=2000L;
     PaseoSelection.Gate mFlowGate; String mFlowExpected, mFlowPackage;
-    Runnable mPaseoCheck; boolean mode=true, auto=true, reject;
+    Runnable mPaseoCheck; boolean mFlowDispatched; boolean mode=true, auto=true, reject, gestureEnabled, neverReset, staleCache;
+    int gestures;
     int echoDelay, focusDelay, childrenAtWrite, childrenAtClick; long idleAtWrite, idleAtClick; String feedback="sentinel";
     static final String TAG="test";
     boolean isDictationModeEnabled() { return mode; } boolean isAutoSendEnabled() { return auto; }
     AccessibilityNodeInfo getApplicationRoot() { now+=IPC; return root; }
     CharSequence readPasteText(String s) { return s==null?"replacement":s; }
     void pasteIntoFocusedField(String text) { pasteIntoPaseo(getApplicationRoot(), text); }
+    static class Path { void moveTo(float x,float y) {} }
+    static class GestureDescription {
+        static class StrokeDescription { StrokeDescription(Path p,long start,long duration) {} }
+        static class Builder { Builder addStroke(StrokeDescription s) { return this; } GestureDescription build() { return new GestureDescription(); } }
+    }
+    static class GestureResultCallback { public void onCancelled(GestureDescription g) {} }
+    boolean dispatchGesture(GestureDescription gesture,GestureResultCallback callback,Handler handler) {
+        if(!gestureEnabled) return false;
+        gestures++;
+        if(!neverReset) editor.text="";
+        return true;
+    }
     // PRODUCTION_METHODS
 
     static PaseoServiceHarness fixture(boolean flat, int historyRows) {
@@ -238,8 +259,22 @@ public class PaseoServiceHarness {
         s.complete(); s.mKeyHandler.run();
         check(clicks==0 && s.feedback.equals("Inserted — send manually"),"unavailable Send terminates without dispatch");
         check(now>=2000000 && now<2300000,"readiness respects the real two-second budget");
+        s=fixture(false,0); s.staleCache=true; s.complete(); s.mKeyHandler.run();
+        check(clicks==1,"cached tree draft cannot override refreshed exact echo");
+        s=fixture(false,0); s.gestureEnabled=true; s.complete(); s.mKeyHandler.run();
+        check(s.gestures==1 && clicks==0 && s.feedback.equals("Submitted to Paseo"),"native tap confirms composer reset");
+        s=fixture(false,0); s.gestureEnabled=true; s.neverReset=true; s.complete(); s.mKeyHandler.run();
+        check(s.gestures==1 && clicks==0 && s.feedback.equals("Send not confirmed — tap Send"),"accepted ineffective tap is never retried");
+        s=fixture(false,0); s.send.enabled=false; s.complete();
+        s.onAccessibilityEvent(new AccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SCROLLED,s.root));
+        s.send.enabled=true; s.mKeyHandler.run(); check(clicks==1,"automatic non-editor scroll revalidates same composer");
+    }
+    static void staleCacheRegression() {
+        PaseoServiceHarness s=fixture(false,0); s.staleCache=true; s.complete(); s.mKeyHandler.run();
+        check(clicks==1,"cached tree draft cannot override refreshed exact echo");
     }
     public static void main(String[] args) {
+        if(args[0].equals("stale-cache")) { staleCacheRegression(); return; }
         if(args[0].equals("autosend")) { autosendRegressions(); return; }
         benchmark(args[0]); if(args[0].equals("after"))regressions();
     }

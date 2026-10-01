@@ -2,7 +2,7 @@
 
 This test-only APK runs **the production VoiceVaultKeyService**, including its
 private PaseoTree adapter, selector, echo gate, identity checks, event handling,
-retry scheduling and actual accessibility SET_TEXT/CLICK actions. No production
+retry scheduling, native SET_TEXT and gesture actions, and volume-key filter. No production
 package exception, instrumentation hook, or service test branch was added.
 
 The target is `sh.paseo.debug`, already recognized by production. The fixture APK
@@ -35,13 +35,13 @@ native fixture instead.
 
 Android's accessibility export actually flattens the non-important COLUMN and
 row groups in this fixture. That exposed a second selector requirement: local
-same-parent input/control plus an adjacent toolbar peer when groups are omitted.
+geometry checks in the original selector. The current selector no longer requires optional peers.
 The JVM regressions additionally cover the unflattened source hierarchy.
 
 ## Run
 
-Use a booted, isolated API34 emulator, with KVM access granted by the administrator
-if necessary. Do not install this fixture on a user's device or a Paseo-bearing
+Use a booted, isolated API34 emulator with root adb access for offline kernel
+key events (`adb -s emulator-5580 root`), with KVM access if necessary. Do not install this fixture on a user's device or a Paseo-bearing
 emulator.
 
 ```sh
@@ -56,21 +56,29 @@ labels, visibility, actions, chosen node, writes, ACTION_CLICK count, mock callb
 count and feedback) and `logcat.log` under `VV_NATIVE_OUT`. `--build-only` builds
 without requiring or changing an emulator; that is **not native verification**.
 
-Completed evidence is the prior 25-case run; the operator waived the expanded
-final rerun after KVM permissions were lost. See [VERIFICATION.md](VERIFICATION.md)
-for exact results, production-bytecode matching, APK hash and limits. Do not claim
-that the expanded harness below ran.
+Historical evidence and limits of the prior 25-case run remain in
+[VERIFICATION.md](VERIFICATION.md). The 1.2.17 verification receipt is tracked in
+`openspec/changes/fix-paseo-dispatch-and-key-filter/verification.md`.
 
-The current test-only harness covers 28 cases: four exact labels × short/multiline × actual
+The current test-only harness covers 33 cases: four exact labels × short/multiline × actual
 keyboard closed/open; delayed echo replacing an existing draft; disabled,
 ambiguous and context-only controls; auto-send off; manual touchscreen send/remount,
-clear, edit and navigation/remount; rejected CLICK without retries; literal
-placeholder text; and echo timeout with unconfirmed-insertion feedback.
+clear, edit and navigation/remount; ineffective CLICK bypassed by touch and ineffective touch without retries; literal
+placeholder text; echo timeout; idle and processing Down shortcuts; and double-Down
+ON/OFF toggling. Real Down checks also assert all relevant volume streams stay unchanged.
 
-Successful automatic dispatch deliberately does not announce server acceptance.
-Manual cancellation preserves a sentinel feedback rather than replacing it with
-a misleading composer/draft failure. Unresolved exact-echoed autosend reports
-`Inserted — send manually`; a write without echo reports insertion unconfirmed.
+Submission displays `Sending to Paseo…`, then `Submitted to Paseo` when the native
+composer clears/resets. This is local UI confirmation, not server acceptance.
+Unchanged text after an accepted tap produces `Send not confirmed — tap Send`;
+there is no automatic second dispatch. Manual cancellation shows `Auto-send canceled`.
+Unresolved exact-echoed autosend reports `Inserted — send manually`; a write without
+echo reports insertion unconfirmed.
+
+`hardware-keys.py` responds only to whitelisted volume-key requests from the offline
+instrumentation, writing EV_KEY press/release events to the isolated emulator's
+keyboard device. Software-injected UiAutomation keys bypass the native filter and
+are not suitable evidence of hardware key consumption. This helper requires root
+adb on the disposable emulator and refuses physical serials.
 
 The 1.2.16 source repair uses a two-second readiness deadline, accepts a unique
 exact local send control without optional toolbar peers, and revalidates normal
