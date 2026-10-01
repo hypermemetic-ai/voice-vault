@@ -84,7 +84,7 @@ public class SetupActivity extends Activity {
     private void buildCards() {
         addCard("accessibility",
                 "1 · DICTATION KEYS (ACCESSIBILITY SERVICE)",
-                "Volume Up toggles recording. Volume Down finishes dictation, inserts the text and sends it when Auto-send is on. "
+                "Volume Up toggles recording. Volume Down finishes dictation, inserts the text and sends it when Auto-send is on. Double Volume Down toggles Auto-send with ON/OFF feedback. "
                         + "Android updates often switch this service off — when it is off, "
                         + "the volume buttons do nothing.",
                 "Android 13/14 sideload fix: if the toggle is greyed out as "

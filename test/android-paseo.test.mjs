@@ -25,7 +25,9 @@ test('native path is isolated from generic multi-send and retains clipboard/hist
   assert.match(s, /if \(PaseoSelection\.isPaseo\(pkg\)\) \{\s*pasteIntoPaseo\(appRoot, completedTranscript\);\s*return;/);
   assert.match(s, /readPasteText\(transcript\)/);
   assert.match(s, /mPendingDictation\.complete\(recordingId, text, packageName, windowId\)/);
-  assert.match(s, /mPaseoGeneration\+\+;\s*clearFlowComposer\(\);\s*boolean accepted/);
+  assert.match(s, /mFlowDispatched = true/);
+  assert.match(s, /tapPaseo\(target, generation\)/);
+  assert.match(s, /Send not confirmed — tap Send/);
   const adapter = s.split('private static final class PaseoTree')[1].split('private void paseoFeedback')[0];
   assert.match(adapter, /n\.label = desc != null \? desc\.toString\(\) : hint != null \? hint\.toString\(\)/);
   assert.match(adapter, /n\.text = PaseoSelection\.draftText\(n\.editable,\s*Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.O && info\.isShowingHintText\(\), text\)/);

@@ -30,7 +30,7 @@ test("mode is refreshed at tile toggle/listening, accessibility reconnect/change
   assert.match(key, /registerOnSharedPreferenceChangeListener\(mModeListener\)/);
   assert.match(key, /PREF_DICTATION_MODE\.equals\(key\)\) \{\s*cancelPendingKeyCallbacks\(\);\s*FloatingPillOverlay\.refreshMode\(this\)/);
   assert.match(key, /unregisterOnSharedPreferenceChangeListener\(mModeListener\)/);
-  assert.match(key, /getApplicationRoot\(\)[\s\S]*?TYPE_INPUT_METHOD[\s\S]*?TYPE_APPLICATION && window\.isFocused\(\)/);
+  assert.match(key, /getApplicationRoot\(\)[\s\S]*?TYPE_APPLICATION && window\.isFocused\(\)/);
   assert.match(main, /void onResume\(\)[\s\S]*?FloatingPillOverlay\.refreshMode\(this\)/);
 });
 

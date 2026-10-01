@@ -16,14 +16,19 @@ public class PaseoFixtureActivity extends Activity {
     LinearLayout column, row;
     EditText editor;
     View send;
-    int clicks, writes, clickActions, echoDelay;
-    boolean rejectClick;
+    int clicks, writes, clickActions, echoDelay, touchDowns;
+    boolean rejectClick, ignoreTouch;
     String submitted;
     boolean multiline;
     int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
     @Override public void onCreate(Bundle b) { super.onCreate(b); instance = this; configure("Send message", false, true, false, 0); }
     View button(String label) {
         TextView v = new TextView(this) {
+            @Override public boolean onTouchEvent(android.view.MotionEvent event) {
+                if (this == send && event.getAction() == android.view.MotionEvent.ACTION_DOWN) touchDowns++;
+                if (this == send && ignoreTouch) return true;
+                return super.onTouchEvent(event);
+            }
             @Override public boolean performAccessibilityAction(int action, Bundle args) {
                 if (this == send && action == android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) {
                     clickActions++;
@@ -38,7 +43,7 @@ public class PaseoFixtureActivity extends Activity {
         return v;
     }
     void configure(String label, boolean lines, boolean enabled, boolean duplicate, int delay) {
-        clicks = writes = clickActions = 0; rejectClick = false;
+        clicks = writes = clickActions = touchDowns = 0; rejectClick = ignoreTouch = false;
         submitted = null; multiline = lines; echoDelay = delay;
         LinearLayout screen = new LinearLayout(this); screen.setOrientation(LinearLayout.VERTICAL);
         // Tempting exact GLOBAL control must never be selected.
