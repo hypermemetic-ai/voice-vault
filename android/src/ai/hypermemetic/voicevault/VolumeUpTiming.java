@@ -2,7 +2,7 @@ package ai.hypermemetic.voicevault;
 
 /** Uptime-based press deadlines; a queued callback is not evidence of a double press. */
 final class VolumeUpTiming {
-    static final long UP_WINDOW_MS = 220;
+    static final long UP_WINDOW_MS = 240;
 
     enum ActivePress { FIRST, DOUBLE, EXPIRED_FIRST }
 

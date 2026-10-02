@@ -9,7 +9,7 @@ import { spawnSync } from "node:child_process";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const java = path.join(root, "android/src/ai/hypermemetic/voicevault");
 
-test("Up and Down 220ms uptime deadlines, delayed handlers, repeats and mode transitions", () => {
+test("Up and Down 240ms uptime deadlines, delayed handlers, repeats and mode transitions", () => {
   const classes = fs.mkdtempSync(path.join(os.tmpdir(), "voice-vault-keys-"));
   try {
     const compiled = spawnSync("javac", ["--release", "11", "-d", classes,

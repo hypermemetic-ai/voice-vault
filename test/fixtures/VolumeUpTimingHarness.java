@@ -74,53 +74,53 @@ public final class VolumeUpTimingHarness {
     }
 
     public static void main(String[] args) {
-        check(VolumeUpTiming.UP_WINDOW_MS == 220, "Up and Down deadlines must be 220ms");
-        for (int delta : new int[]{219, 220, 221}) {
+        check(VolumeUpTiming.UP_WINDOW_MS == 240, "Up and Down deadlines must be 240ms");
+        for (int delta : new int[]{239, 240, 241}) {
             Keys off = new Keys();
             off.up(100, false);
             off.up(100 + delta, false);
-            check(off.mode == (delta <= 220), "off deadline " + delta);
-            check(off.toggles == (delta <= 220 ? 1 : 0), "off toggle " + delta);
-            check(off.passed == (delta <= 220 ? 1 : 2), "off pass-through " + delta);
+            check(off.mode == (delta <= 240), "off deadline " + delta);
+            check(off.toggles == (delta <= 240 ? 1 : 0), "off toggle " + delta);
+            check(off.passed == (delta <= 240 ? 1 : 2), "off pass-through " + delta);
 
             Keys on = new Keys();
             on.mode(true);
             on.up(100, false);
             // Deliberately leave the first callback pending, even past its due time.
             on.up(100 + delta, false);
-            check(on.mode == (delta > 220), "on deadline " + delta);
-            check(on.toggles == (delta <= 220 ? 1 : 0), "on toggle " + delta);
-            check(on.recordings == (delta > 220 ? 1 : 0), "expired first single " + delta);
+            check(on.mode == (delta > 240), "on deadline " + delta);
+            check(on.toggles == (delta <= 240 ? 1 : 0), "on toggle " + delta);
+            check(on.recordings == (delta > 240 ? 1 : 0), "expired first single " + delta);
             on.handler(1000);
-            check(on.recordings == (delta > 220 ? 2 : 0), "new single or canceled double " + delta);
+            check(on.recordings == (delta > 240 ? 2 : 0), "new single or canceled double " + delta);
 
             Keys downBoundary = new Keys();
             downBoundary.mode(true);
             downBoundary.down(100, false);
             // Leave the first callback queued even after its deadline.
             downBoundary.down(100 + delta, false);
-            check(downBoundary.downDoubles == (delta <= 220 ? 1 : 0), "Down double " + delta);
-            check(downBoundary.downSingles == (delta > 220 ? 1 : 0), "expired Down single " + delta);
+            check(downBoundary.downDoubles == (delta <= 240 ? 1 : 0), "Down double " + delta);
+            check(downBoundary.downSingles == (delta > 240 ? 1 : 0), "expired Down single " + delta);
             downBoundary.handler(1000);
-            check(downBoundary.downSingles == (delta > 220 ? 2 : 0), "new Down single or canceled double " + delta);
+            check(downBoundary.downSingles == (delta > 240 ? 2 : 0), "new Down single or canceled double " + delta);
         }
 
         Keys single = new Keys();
         single.mode(true);
         single.up(0, false); // uptime zero is a real press
-        single.handler(220);
+        single.handler(240);
         check(single.recordings == 0, "inclusive boundary must not fire single early");
-        single.handler(221);
+        single.handler(241);
         check(single.recordings == 1, "active single recording toggle");
         single.up(500, false);
         single.up(550, true);
-        single.handler(721);
+        single.handler(741);
         check(single.recordings == 2 && single.toggles == 0, "repeat must not pair with first");
 
         Keys inactive = new Keys();
         inactive.up(0, false);
         inactive.up(1, true);
-        inactive.up(220, false);
+        inactive.up(240, false);
         check(inactive.mode && inactive.toggles == 1 && inactive.passed == 2,
                 "inactive repeat passes through without changing first-press time");
 
@@ -139,13 +139,13 @@ public final class VolumeUpTimingHarness {
         down.mode(true);
         down.down(0, false);
         down.down(100, true);
-        down.down(220, false);
-        check(down.downDoubles == 1 && down.downSingles == 0, "Down repeat cannot pair; 220ms inclusive");
+        down.down(240, false);
+        check(down.downDoubles == 1 && down.downSingles == 0, "Down repeat cannot pair; 240ms inclusive");
         down.down(500, false);
-        down.handler(720);
-        check(down.downSingles == 0, "Down single waits past inclusive 220ms");
-        down.handler(721);
-        check(down.downSingles == 1, "Down single fires after 220ms");
+        down.handler(740);
+        check(down.downSingles == 0, "Down single waits past inclusive 240ms");
+        down.handler(741);
+        check(down.downSingles == 1, "Down single fires after 240ms");
         down.mode(false);
         down.down(1000, false);
         check(down.passed == 1, "inactive Down passes through");
