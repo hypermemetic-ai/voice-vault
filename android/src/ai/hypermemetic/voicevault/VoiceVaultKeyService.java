@@ -281,7 +281,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     Log.i(TAG, "Dictation Mode: expired Vol Up single-press -> toggle recording");
                     toggleDictation();
                 }
-                // Run just after the inclusive 220ms boundary, so a press at 220ms can win.
+                // Run just after the inclusive 240ms boundary, so a press at 240ms can win.
                 Runnable single = new Runnable() {
                     @Override public void run() {
                         if (mPendingVolUpRunnable != this) return;
