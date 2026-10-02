@@ -76,7 +76,7 @@ public class PaseoFixtureTest extends Instrumentation {
     void result(String name, int clicks, String feedback) throws Exception {
         check(activity.clicks == clicks, name + " clicks=" + activity.clicks + " writes=" + activity.writes + " touch=" + activity.touchDowns + " clickActions=" + activity.clickActions + " feedback=" + feedback());
         check(activity.writes == 1, name + " writes=" + activity.writes);
-        check(activity.touchDowns + activity.clickActions <= 1, name + " repeated native dispatch=" + activity.clickActions);
+        check(activity.touchDowns + activity.clickActions <= (activity.rejectClick ? 2 : 1), name + " repeated native dispatch=" + activity.clickActions);
         check(feedback.equals(feedback()), name + " feedback=" + feedback());
         check(field(VoiceVaultKeyService.class, "mFlowComposer", service) == null, name + " flow still pending");
         cases++; report("PASS " + name + " writes=" + activity.writes + " nativeClickActions=" + activity.clickActions
@@ -121,7 +121,7 @@ public class PaseoFixtureTest extends Instrumentation {
                     begin(text); pause(1300);
                     result(name, 1, "Submitted to Paseo");
                     check(text.equals(activity.submitted), "wrong submitted text");
-                    check(activity.touchDowns == 1 && activity.clickActions == 0, "not one native touch");
+                    check(activity.touchDowns == 0 && activity.clickActions == 1, "not one semantic click");
                 }
             setup("Send message", false, true, false, 300, false);
             main(() -> activity.editor.setText("existing draft")); pause(200);
@@ -131,7 +131,8 @@ public class PaseoFixtureTest extends Instrumentation {
                 setup(kind.equals("context only") ? "Context window 50% used" : "Send message", false,
                         !kind.equals("disabled"), kind.equals("ambiguous"), 0, false);
                 dump(kind); begin("ready draft"); pause(2300);
-                result(kind, 0, "Inserted — send manually");
+                result(kind, 0, kind.equals("disabled") ? "Inserted — Send disabled"
+                        : kind.equals("ambiguous") ? "Inserted — multiple Send controls" : "Inserted — Send unavailable");
                 check("ready draft".equals(activity.editor.getText().toString()), "inserted text lost");
             }
             setup("Send message", false, true, false, 0, false);
@@ -153,11 +154,15 @@ public class PaseoFixtureTest extends Instrumentation {
             setup("Send message", false, true, false, 0, false);
             main(() -> activity.rejectClick = true); begin("inserted"); pause(1300);
             result("ineffective accessibility click bypassed by touch", 1, "Submitted to Paseo");
-            check(activity.clickActions == 0 && activity.touchDowns == 1, "one physical tap required");
+            check(activity.clickActions == 1 && activity.touchDowns == 1, "one rejected click and one physical tap required");
             setup("Send message", false, true, false, 0, false);
-            main(() -> activity.ignoreTouch = true); begin("inserted"); pause(1800);
+            main(() -> { activity.rejectClick = true; activity.ignoreTouch = true; }); begin("inserted"); pause(1800);
             result("ineffective native tap never retried", 0, "Send not confirmed — tap Send");
             check(activity.touchDowns == 1, "must attempt touch exactly once");
+            setup("Send message", false, true, false, 0, false);
+            main(() -> activity.ignoreClick = true); begin("inserted"); pause(1800);
+            result("accepted ineffective semantic click never retried", 0, "Send not confirmed — tap Send");
+            check(activity.clickActions == 1 && activity.touchDowns == 0, "accepted action must not trigger a second activation");
             setup("Send message", false, true, false, 0, false); begin(PaseoSelection.COMPOSER); pause(1300);
             result("literal placeholder text is real echo", 1, "Submitted to Paseo");
             check(PaseoSelection.COMPOSER.equals(activity.submitted), "literal hint lost");

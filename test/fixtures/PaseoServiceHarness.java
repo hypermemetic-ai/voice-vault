@@ -43,7 +43,7 @@ public class PaseoServiceHarness {
     static class AccessibilityNodeInfo {
         static final int FOCUS_INPUT=1, ACTION_FOCUS=2, ACTION_SET_TEXT=3, ACTION_CLICK=4;
         static final String ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE="text";
-        String label, text="", pkg="sh.paseo.debug";
+        String label, text="", pkg="sh.paseo.debug", id;
         Rect bounds; boolean editable, focused, visible=true, enabled=true, clickable=true, hint, alive=true;
         int window=1; List<AccessibilityNodeInfo> kids=new ArrayList<>();
         PaseoServiceHarness owner; Runnable onRefresh; AccessibilityNodeInfo identity;
@@ -59,6 +59,11 @@ public class PaseoServiceHarness {
         CharSequence getText() { return text; } boolean isShowingHintText() { return hint; }
         int getChildCount() { return kids.size(); }
         AccessibilityNodeInfo getChild(int i) { children++; now+=IPC; AccessibilityNodeInfo n=kids.get(i);
+            if(n.owner!=null && n==n.owner.send && n.owner.staleReadiness && writes>0) {
+                AccessibilityNodeInfo copy=new AccessibilityNodeInfo(n.label,n.bounds.left,n.bounds.top,n.bounds.right,n.bounds.bottom);
+                copy.identity=n; copy.enabled=false; copy.owner=n.owner;
+                return copy;
+            }
             if(n.editable && n.owner!=null && n.owner.staleCache && writes>0) {
                 AccessibilityNodeInfo copy=new AccessibilityNodeInfo(n.label,n.bounds.left,n.bounds.top,n.bounds.right,n.bounds.bottom);
                 copy.identity=n; copy.editable=true; copy.text="existing draft"; copy.owner=n.owner;
@@ -66,8 +71,19 @@ public class PaseoServiceHarness {
             }
             return n; }
         String getPackageName() { return pkg; } int getWindowId() { return window; }
+        String getViewIdResourceName() { return id; }
+        AccessibilityNodeInfo getParent() { return owner == null ? null : findParent(owner.root, this); }
+        static AccessibilityNodeInfo findParent(AccessibilityNodeInfo n, AccessibilityNodeInfo target) {
+            for (AccessibilityNodeInfo c : n.kids) {
+                if (c.equals(target)) return n;
+                AccessibilityNodeInfo p = findParent(c, target); if (p != null) return p;
+            }
+            return null;
+        }
         boolean isFocused() { return focused; }
-        boolean refresh() { refreshes++; now+=IPC; if (onRefresh!=null) { Runnable r=onRefresh; onRefresh=null; r.run(); } return alive; }
+        boolean refresh() { refreshes++; now+=IPC;
+            if (identity != null && owner != null && identity == owner.send) enabled=owner.send.enabled;
+            if (onRefresh!=null) { Runnable r=onRefresh; onRefresh=null; r.run(); } return alive; }
         AccessibilityNodeInfo findFocus(int kind) { focuses++; now+=IPC; return focusedNode(this); }
         static AccessibilityNodeInfo focusedNode(AccessibilityNodeInfo n) {
             if (n.focused && n.alive) return n;
@@ -107,7 +123,7 @@ public class PaseoServiceHarness {
     long mPendingPaseoId=-1; int mPaseoGeneration, mFlowWindow=-1, mPaseoAttempt;
     long mPaseoDeadline; static final long PASEO_READY_TIMEOUT_MS=2000L;
     PaseoSelection.Gate mFlowGate; String mFlowExpected, mFlowPackage;
-    Runnable mPaseoCheck; boolean mFlowDispatched; boolean mode=true, auto=true, reject, gestureEnabled, neverReset, staleCache;
+    Runnable mPaseoCheck; boolean mFlowDispatched; boolean mode=true, auto=true, reject, gestureEnabled, neverReset, staleCache, staleReadiness;
     int gestures;
     int echoDelay, focusDelay, childrenAtWrite, childrenAtClick; long idleAtWrite, idleAtClick; String feedback="sentinel";
     static final String TAG="test";
@@ -150,10 +166,15 @@ public class PaseoServiceHarness {
         s.send=new AccessibilityNodeInfo("Send message",354,464,382,492); s.send.owner=s;
         toolbar.kids.add(new AccessibilityNodeInfo("Context window 50% used",18,464,90,492));
         toolbar.kids.add(new AccessibilityNodeInfo("Voice",320,464,348,492)); toolbar.kids.add(s.send);
-        if(flat) { s.root.kids.add(s.editor); s.root.kids.addAll(toolbar.kids); }
+        column.id="message-input-root";
+        if(flat) { s.root.kids.add(column); column.kids.add(s.editor); column.kids.addAll(toolbar.kids); }
         else { s.root.kids.add(column); column.kids.add(s.editor); column.kids.add(toolbar); }
+        assignOwner(s.root, s);
         s.mPendingComposer=s.editor; s.mPendingDictation.begin(42,"sh.paseo.debug",1); s.mPendingPaseoId=42;
         return s;
+    }
+    static void assignOwner(AccessibilityNodeInfo node, PaseoServiceHarness owner) {
+        node.owner = owner; for (AccessibilityNodeInfo child : node.kids) assignOwner(child, owner);
     }
     void complete() { insertCompletedRecording(42,"replacement"); }
     static void benchmark(String revision) {
@@ -186,7 +207,7 @@ public class PaseoServiceHarness {
         for(String label:new String[]{"Context window 50% used","Voice","Send"}) {
             s=fixture(false,1000); s.send.label=label; s.complete(); s.mKeyHandler.run(); check(clicks==0 && writes==1,"not submit "+label); cases++;
         }
-        s=fixture(true,1000); s.root.kids.add(new AccessibilityNodeInfo("Queue message",354,464,382,492)); s.complete(); s.mKeyHandler.run(); check(clicks==0,"ambiguous"); cases++;
+        s=fixture(true,1000); s.root.kids.get(s.root.kids.size()-1).kids.add(new AccessibilityNodeInfo("Queue message",354,464,382,492)); s.complete(); s.mKeyHandler.run(); check(clicks==0,"ambiguous"); cases++;
         s=fixture(false,1000); s.reject=true; s.complete(); s.mKeyHandler.run(); check(clicks==1 && writes==1,"rejected no retry"); cases++;
         s=fixture(false,1000); s.send.onRefresh=()->{}; final PaseoServiceHarness stale=s;
         s.send.onRefresh=()->stale.send.label="Voice"; s.complete(); s.mKeyHandler.run(); check(clicks==0,"changed action target refresh"); cases++;
@@ -218,8 +239,8 @@ public class PaseoServiceHarness {
         s.mKeyHandler.postDelayed(()->{ready.send.enabled=true; ready.observePaseoFlow();},25); s.mKeyHandler.run();
         check(clicks==1 && clickAt<100000,"event wakes readiness before timer"); cases++;
         s=fixture(false,1000); final PaseoServiceHarness moved=s;
-        s.send.onRefresh=()->moved.editor.bounds.bottom+=50; s.complete(); s.mKeyHandler.run(); check(clicks==0,"editor geometry changes before dispatch"); cases++;
-        s=fixture(true,1000); s.root.kids.removeIf(n->n.label.equals("Voice")); s.complete(); s.mKeyHandler.run(); check(clicks==1,"exact local send survives optional peer absence"); cases++;
+        s.send.onRefresh=()->moved.editor.bounds.bottom+=50; s.complete(); s.mKeyHandler.run(); check(clicks==1,"editor geometry is not a send contract"); cases++;
+        s=fixture(true,1000); s.root.kids.get(s.root.kids.size()-1).kids.removeIf(n->n.label.equals("Voice")); s.complete(); s.mKeyHandler.run(); check(clicks==1,"exact local send survives optional peer absence"); cases++;
         s=fixture(false,1000); AccessibilityNodeInfo duplicate=new AccessibilityNodeInfo(PaseoSelection.COMPOSER,24,428,376,452); duplicate.editable=true;
         s.root.kids.add(duplicate); s.pasteIntoPaseo(s.root,"replacement"); s.mKeyHandler.run(); check(writes==0,"clipboard ambiguous composer"); cases++;
         System.out.println("production-method regressions passed="+cases);
@@ -251,20 +272,20 @@ public class PaseoServiceHarness {
 
         s=fixture(true,0);
         final PaseoServiceHarness minimal=s;
-        s.root.kids.removeIf(n->n!=minimal.editor && n!=minimal.send && !n.label.equals("chat history"));
+        s.root.kids.get(1).kids.removeIf(n->n!=minimal.editor && n!=minimal.send);
         s.complete(); s.mKeyHandler.run();
         check(writes==1 && clicks==1,"exact local send must not depend on optional toolbar peers");
 
         s=fixture(false,0); s.send.enabled=false;
         s.complete(); s.mKeyHandler.run();
-        check(clicks==0 && s.feedback.equals("Inserted — send manually"),"unavailable Send terminates without dispatch");
+        check(clicks==0 && s.feedback.equals("Inserted — Send disabled"),"disabled Send terminates without dispatch");
         check(now>=2000000 && now<2300000,"readiness respects the real two-second budget");
         s=fixture(false,0); s.staleCache=true; s.complete(); s.mKeyHandler.run();
         check(clicks==1,"cached tree draft cannot override refreshed exact echo");
-        s=fixture(false,0); s.gestureEnabled=true; s.complete(); s.mKeyHandler.run();
-        check(s.gestures==1 && clicks==0 && s.feedback.equals("Submitted to Paseo"),"native tap confirms composer reset");
+        s=fixture(false,0); s.gestureEnabled=true; s.reject=true; s.complete(); s.mKeyHandler.run();
+        check(s.gestures==1 && clicks==1 && s.feedback.equals("Submitted to Paseo"),"rejected click uses one native tap");
         s=fixture(false,0); s.gestureEnabled=true; s.neverReset=true; s.complete(); s.mKeyHandler.run();
-        check(s.gestures==1 && clicks==0 && s.feedback.equals("Send not confirmed — tap Send"),"accepted ineffective tap is never retried");
+        check(s.gestures==0 && clicks==1 && s.feedback.equals("Send not confirmed — tap Send"),"accepted ineffective action is never retried");
         s=fixture(false,0); s.send.enabled=false; s.complete();
         s.onAccessibilityEvent(new AccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SCROLLED,s.root));
         s.send.enabled=true; s.mKeyHandler.run(); check(clicks==1,"automatic non-editor scroll revalidates same composer");
@@ -273,7 +294,12 @@ public class PaseoServiceHarness {
         PaseoServiceHarness s=fixture(false,0); s.staleCache=true; s.complete(); s.mKeyHandler.run();
         check(clicks==1,"cached tree draft cannot override refreshed exact echo");
     }
+    static void staleReadinessRegression() {
+        PaseoServiceHarness s=fixture(false,0); s.staleReadiness=true; s.complete(); s.mKeyHandler.run();
+        check(clicks==1,"cached Send readiness must be refreshed before rejecting the control");
+    }
     public static void main(String[] args) {
+        if(args[0].equals("stale-readiness")) { staleReadinessRegression(); return; }
         if(args[0].equals("stale-cache")) { staleCacheRegression(); return; }
         if(args[0].equals("autosend")) { autosendRegressions(); return; }
         benchmark(args[0]); if(args[0].equals("after"))regressions();

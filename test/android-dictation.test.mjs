@@ -117,12 +117,12 @@ test("manifest wires tile long-press and bumps version", () => {
     "MainActivity must declare QS_TILE_PREFERENCES",
   );
   assert.ok(
-    manifest.includes('android:versionCode="21"'),
-    "expected versionCode 21",
+    manifest.includes('android:versionCode="22"'),
+    "expected versionCode 22",
   );
   assert.ok(
-    manifest.includes('android:versionName="1.2.17"'),
-    "expected versionName 1.2.17",
+    manifest.includes('android:versionName="1.2.18"'),
+    "expected versionName 1.2.18",
   );
 });
 

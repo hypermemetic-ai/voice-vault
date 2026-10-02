@@ -684,13 +684,32 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private static final class PaseoTree implements AutoCloseable {
         final PaseoSelection.Node root;
         final java.util.ArrayList<AccessibilityNodeInfo> owned = new java.util.ArrayList<>();
-        final Rect band;
-        PaseoTree(AccessibilityNodeInfo node) { this(node, null); }
-        // A fresh screen skeleton preserves actual ancestry (including flattened
-        // siblings), but does not descend into unrelated history above the input.
-        PaseoTree(AccessibilityNodeInfo node, Rect band) {
-            this.band = band;
+        final boolean refresh;
+        PaseoTree(AccessibilityNodeInfo node) {
+            refresh = false;
             root = visit(node, "", true);
+        }
+        // Paseo exposes a stable named composer ancestor. Read only that subtree,
+        // refreshing its child lists and controls rather than trusting cached readiness.
+        PaseoTree(AccessibilityNodeInfo composer, AccessibilityNodeInfo application) {
+            refresh = true;
+            PaseoSelection.Node found = null;
+            AccessibilityNodeInfo parent = composer.getParent();
+            for (int depth = 0; parent != null && depth < 32; depth++) {
+                owned.add(parent);
+                if (!parent.refresh() || parent.getWindowId() != application.getWindowId()
+                        || application.getPackageName() == null
+                        || !application.getPackageName().equals(parent.getPackageName())) break;
+                if (PaseoSelection.CONTAINER_ID.equals(parent.getViewIdResourceName())) {
+                    found = visit(parent, "", true);
+                    break;
+                }
+                if (parent.equals(application)) break;
+                parent = parent.getParent();
+            }
+            // Recycle the unvisited parent if the depth limit was reached.
+            if (parent != null && !owned.contains(parent)) owned.add(parent);
+            root = found;
         }
         private static PaseoSelection.Node describe(AccessibilityNodeInfo info) {
             PaseoSelection.Node n = new PaseoSelection.Node();
@@ -699,6 +718,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             n.left = rect.left; n.top = rect.top; n.right = rect.right; n.bottom = rect.bottom;
             n.visible = info.isVisibleToUser() && !rect.isEmpty();
             n.enabled = info.isEnabled(); n.clickable = info.isClickable(); n.editable = info.isEditable();
+            n.id = info.getViewIdResourceName();
             CharSequence desc = info.getContentDescription();
             CharSequence hint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? info.getHintText() : null;
             CharSequence text = info.getText();
@@ -711,11 +731,10 @@ public class VoiceVaultKeyService extends AccessibilityService {
             return n;
         }
         private PaseoSelection.Node visit(AccessibilityNodeInfo info, String path, boolean visible) {
+            if (refresh && !info.refresh()) return new PaseoSelection.Node();
             PaseoSelection.Node n = describe(info);
             n.path = path;
             n.visible &= visible;
-            if (band != null && (n.bottom <= band.top || n.top > band.bottom
-                    || n.right < band.left || n.left > band.right)) return n;
             for (int i = 0; i < info.getChildCount(); i++) {
                 AccessibilityNodeInfo child = info.getChild(i);
                 if (child != null) {
@@ -838,8 +857,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (mFlowGate.isCanceled()) { cancelPaseoFlow(); return; }
             // No toolbar query at all before exact echo, or for insertion-only.
             boolean needToolbar = expected.equals(fresh.text) && isAutoSendEnabled();
-            Rect band = new Rect(fresh.left, fresh.top, fresh.right, rootBoundsBottom(root));
-            try (PaseoTree tree = needToolbar ? new PaseoTree(root, band) : null) {
+            try (PaseoTree tree = needToolbar ? new PaseoTree(mFlowComposer, root) : null) {
                 // getChild() may return Android's cached pre-SET_TEXT editor even
                 // after saved.refresh() observes the new text. Only the refreshed,
                 // focused native identity is authoritative for draft and geometry;
@@ -850,7 +868,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 if (state == PaseoSelection.Status.ABORT) {
                     cancelPaseoFlow(); return;
                 }
-                String feedback = PaseoSelection.feedback(state);
+                String feedback = state == PaseoSelection.Status.MANUAL
+                        ? mFlowGate.unavailableFeedback() : PaseoSelection.feedback(state);
                 if (feedback != null) { paseoFeedback(feedback); return; }
                 if (state == PaseoSelection.Status.INSERTED) {
                     paseoFeedback("Inserted — auto-send OFF"); return;
@@ -861,7 +880,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     AccessibilityNodeInfo target = (AccessibilityNodeInfo) button.handle;
                     // Refresh the actual action target and editor immediately. A
                     // changed label/geometry/readiness needs a new bounded check.
-                    if (!target.refresh() || !sameButton(button, PaseoTree.describe(target))) {
+                    if (!target.refresh() || !sameButton(button, PaseoTree.describe(target))
+                            || !belongsTo(target, (AccessibilityNodeInfo) tree.root.handle)) {
                         schedulePaseoCheck(generation, pkg, window, expected, 100);
                         return;
                     }
@@ -870,29 +890,26 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     if (echo == null || !expected.equals(echo.text) || mFlowGate.isCanceled()) {
                         cancelPaseoFlow(); return;
                     }
-                    if (!sameBounds(editor, echo)) {
-                        schedulePaseoCheck(generation, pkg, window, expected, 100);
-                        return;
-                    }
                     // Consume before dispatch; action return or later UI state must never trigger a retry.
                     if (!mFlowGate.dispatch()) { cancelPaseoFlow(); return; }
                     mFlowDispatched = true;
                     mPaseoDeadline = SystemClock.uptimeMillis() + 1500L;
                     FloatingPillOverlay.showFeedback(this, "Sending to Paseo…", false);
-                    boolean accepted = tapPaseo(target, generation);
+                    boolean accepted = target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
                     if (!accepted) {
-                        // A rejected gesture queues no touch; only then try the exact native action once.
-                        accepted = target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                        // Android rejected the semantic action; no accepted activation
+                        // is retried. Use one touch at the live control only in this case.
+                        accepted = tapPaseo(target, generation);
                     }
-                    if (!accepted) paseoFeedback("Inserted — send manually");
+                    if (!accepted) paseoFeedback("Send action rejected — tap Send");
                     else schedulePaseoCheck(generation, pkg, window, expected, 100);
                     return;
                 }
             }
         } catch (Throwable t) {
             Log.w(TAG, "Paseo readiness failed", t);
-            paseoFeedback(PaseoSelection.feedback(mFlowGate != null && mFlowGate.hasEcho()
-                    ? PaseoSelection.Status.MANUAL : PaseoSelection.Status.UNCONFIRMED));
+            paseoFeedback(mFlowGate != null && mFlowGate.hasEcho()
+                    ? "Inserted — Send check failed" : PaseoSelection.feedback(PaseoSelection.Status.UNCONFIRMED));
             return;
         } finally { if (root != null) root.recycle(); }
         if (retry) schedulePaseoCheck(generation, pkg, window, expected, 100);
@@ -938,27 +955,32 @@ public class VoiceVaultKeyService extends AccessibilityService {
         } finally { if (root != null) root.recycle(); }
     }
 
-    private static int rootBoundsBottom(AccessibilityNodeInfo root) {
-        Rect rect = new Rect();
-        root.getBoundsInScreen(rect);
-        return rect.bottom;
-    }
-
     private static boolean sameButton(PaseoSelection.Node a, PaseoSelection.Node b) {
         return b.visible && b.enabled && b.clickable && !b.editable && a.label.equals(b.label)
-                && sameBounds(a, b);
+                && a.handle.equals(b.handle);
     }
 
-    private static boolean sameBounds(PaseoSelection.Node a, PaseoSelection.Node b) {
-        return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+    private static boolean belongsTo(AccessibilityNodeInfo target, AccessibilityNodeInfo owner) {
+        AccessibilityNodeInfo parent = target.getParent();
+        for (int depth = 0; parent != null && depth < 32; depth++) {
+            AccessibilityNodeInfo next = null;
+            try {
+                if (!parent.refresh()) return false;
+                if (owner.equals(parent)) return true;
+                next = parent.getParent();
+            } finally { parent.recycle(); }
+            parent = next;
+        }
+        if (parent != null) parent.recycle();
+        return false;
     }
 
     private void schedulePaseoCheck(int generation, String pkg, int window, String expected, long delay) {
         if (generation != mPaseoGeneration || mFlowGate == null) return;
         long remaining = mPaseoDeadline - SystemClock.uptimeMillis();
         if (remaining <= 0) {
-            paseoFeedback(mFlowDispatched ? "Send not confirmed — tap Send" : PaseoSelection.feedback(mFlowGate.hasEcho()
-                    ? PaseoSelection.Status.MANUAL : PaseoSelection.Status.UNCONFIRMED));
+            paseoFeedback(mFlowDispatched ? "Send not confirmed — tap Send" : mFlowGate.hasEcho()
+                    ? mFlowGate.unavailableFeedback() : PaseoSelection.feedback(PaseoSelection.Status.UNCONFIRMED));
             return;
         }
         if (mPaseoCheck != null) mKeyHandler.removeCallbacks(mPaseoCheck);
