@@ -20,9 +20,8 @@ Keep recordings, transcripts and voice profiles local/private; no real audio, pr
 Use the existing stock Codex login/model configuration from this repository root.
 Current capability baselines are in `openspec/specs/`; exact supporting contracts
 and coverage limits are mapped in `docs/native-readiness.md`. OpenSpec uses the
-stock `spec-driven` schema and generated Codex skills in `.agents/skills/`.
-Use stock OpenSpec commands/skills for future changes; do not edit generated
-skills or add an orchestrator, custom schema, wrappers or CLI dependencies.
+stock `spec-driven` schema.
+Do not add an orchestrator, custom schema, wrappers or CLI dependencies.
 Preserve unrelated local edits, staged work, branches and worktrees. Repository
 readiness does not authorize deployment, shared-runtime changes or a second
 concurrent primary conversation.
