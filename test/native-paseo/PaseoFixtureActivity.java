@@ -17,7 +17,7 @@ public class PaseoFixtureActivity extends Activity {
     EditText editor;
     View send;
     int clicks, writes, clickActions, echoDelay, touchDowns;
-    boolean rejectClick, ignoreTouch;
+    boolean rejectClick, ignoreTouch, ignoreClick;
     String submitted;
     boolean multiline;
     int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
@@ -33,6 +33,7 @@ public class PaseoFixtureActivity extends Activity {
                 if (this == send && action == android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) {
                     clickActions++;
                     if (rejectClick) return false;
+                    if (ignoreClick) return true;
                 }
                 return super.performAccessibilityAction(action, args);
             }
@@ -43,7 +44,7 @@ public class PaseoFixtureActivity extends Activity {
         return v;
     }
     void configure(String label, boolean lines, boolean enabled, boolean duplicate, int delay) {
-        clicks = writes = clickActions = touchDowns = 0; rejectClick = ignoreTouch = false;
+        clicks = writes = clickActions = touchDowns = 0; rejectClick = ignoreTouch = ignoreClick = false;
         submitted = null; multiline = lines; echoDelay = delay;
         LinearLayout screen = new LinearLayout(this); screen.setOrientation(LinearLayout.VERTICAL);
         // Tempting exact GLOBAL control must never be selected.
@@ -51,6 +52,14 @@ public class PaseoFixtureActivity extends Activity {
         screen.addView(global);
         screen.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
         column = new LinearLayout(this); column.setOrientation(LinearLayout.VERTICAL);
+        column.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        column.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(View host,
+                    android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                info.setViewIdResourceName("message-input-root");
+            }
+        });
         column.setPadding(dp(12), dp(8), dp(12), dp(8));
         // Background keeps RN's inputWrapper from being a layout-only collapsed view.
         column.setBackgroundColor(0xffeeeeee);

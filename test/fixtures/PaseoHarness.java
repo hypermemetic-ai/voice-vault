@@ -16,6 +16,7 @@ public class PaseoHarness {
             root = node("screen", 0, 0, 400 * scale, 900 * scale);
             column = node("inputWrapper", 12 * scale, y * scale, 388 * scale,
                     (y + inputHeight + 12 + 28 + 8) * scale);
+            column.id = PaseoSelection.CONTAINER_ID;
             editor = node(PaseoSelection.COMPOSER, 24 * scale, (y + 8) * scale,
                     376 * scale, (y + 8 + inputHeight) * scale);
             editor.editable = true;
@@ -56,10 +57,10 @@ public class PaseoHarness {
                 }
                 f.send.label = "Send message";
                 f.toolbar.children.remove(f.send); f.root.children.add(f.send);
-                check(PaseoSelection.submit(f.root, f.editor) == f.send); // wrapper export does not change the local action
+                check(PaseoSelection.submit(f.root, f.editor) == null); // exact global label has no composer ownership
                 f.root.children.remove(f.send); f.toolbar.children.add(f.send);
                 f.send.top -= 100 * scale; f.send.bottom -= 100 * scale;
-                check(PaseoSelection.submit(f.root, f.editor) == null); // above input, context area
+                check(PaseoSelection.submit(f.root, f.editor) == f.send); // moving within the composer is harmless
                 f.send.top += 100 * scale; f.send.bottom += 100 * scale;
                 PaseoSelection.Node copy = node(PaseoSelection.COMPOSER, f.editor.left, f.editor.top, f.editor.right, f.editor.bottom);
                 copy.editable = true; f.column.children.add(copy); check(PaseoSelection.composer(f.root) == null);
@@ -69,18 +70,21 @@ public class PaseoHarness {
     }
     static void flattenedNativeTree() {
         Fixture f = new Fixture(420, 24, 1);
-        // Observed Android export: non-important column/row disappear, while
-        // input and toolbar controls become direct siblings of the window root.
-        f.root.children.clear(); f.root.children.add(f.editor);
-        f.root.children.addAll(f.toolbar.children);
+        // Layout-only wrappers flatten inside the stable named composer root.
+        f.column.children.clear(); f.column.children.add(f.editor);
+        f.column.children.addAll(f.toolbar.children);
         check(PaseoSelection.submit(f.root, f.editor) == f.send);
         PaseoSelection.Node other = node("Queue message", f.send.left, f.send.top, f.send.right, f.send.bottom);
-        f.root.children.add(other); check(PaseoSelection.submit(f.root, f.editor) == null);
-        f.root.children.remove(other);
-        f.root.children.removeAll(f.toolbar.children); f.root.children.add(f.send);
+        f.column.children.add(other); check(PaseoSelection.submit(f.root, f.editor) == null);
+        f.column.children.remove(other);
+        f.column.children.removeAll(f.toolbar.children); f.column.children.add(f.send);
         check(PaseoSelection.submit(f.root, f.editor) == f.send); // optional peers do not identify the action
         f.send.top += 100; f.send.bottom += 100;
-        check(PaseoSelection.submit(f.root, f.editor) == null); // unrelated distant action
+        check(PaseoSelection.submit(f.root, f.editor) == f.send); // geometry cannot break the semantic relationship
+        f.column.id = null; check(PaseoSelection.submit(f.root, f.editor) == null);
+        check(PaseoSelection.unavailable(f.root, f.editor).contains("composer controls unavailable"));
+        f.column.id = PaseoSelection.CONTAINER_ID;
+        f.send.enabled = false; check(PaseoSelection.unavailable(f.root, f.editor).contains("Send disabled"));
     }
     static void flow() {
         Fixture f = new Fixture(420, 20, 1);
