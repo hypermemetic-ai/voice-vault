@@ -59,7 +59,7 @@ public class PaseoServiceHarness {
         CharSequence getText() { return text; } boolean isShowingHintText() { return hint; }
         int getChildCount() { return kids.size(); }
         AccessibilityNodeInfo getChild(int i) { children++; now+=IPC; AccessibilityNodeInfo n=kids.get(i);
-            if(n.owner!=null && n==n.owner.send && n.owner.staleReadiness && writes>0) {
+            if(n.owner!=null && n==n.owner.send && (n.owner.staleReadiness || n.owner.staleStop) && writes>0) {
                 AccessibilityNodeInfo copy=new AccessibilityNodeInfo(n.label,n.bounds.left,n.bounds.top,n.bounds.right,n.bounds.bottom);
                 copy.identity=n; copy.enabled=false; copy.owner=n.owner;
                 return copy;
@@ -71,6 +71,23 @@ public class PaseoServiceHarness {
             }
             return n; }
         String getPackageName() { return pkg; } int getWindowId() { return window; }
+        java.util.List<AccessibilityNodeInfo> findAccessibilityNodeInfosByText(String text) {
+            now+=IPC;
+            java.util.List<AccessibilityNodeInfo> result=new java.util.ArrayList<>();
+            findText(this,text,result); return result;
+        }
+        static void findText(AccessibilityNodeInfo n,String text,java.util.List<AccessibilityNodeInfo> result) {
+            if (n.label != null && n.label.contains(text)) {
+                AccessibilityNodeInfo candidate=n;
+                if (n.owner != null && n==n.owner.send && (n.owner.staleReadiness || n.owner.staleStop) && writes>0) {
+                    candidate=new AccessibilityNodeInfo(n.label,n.bounds.left,n.bounds.top,n.bounds.right,n.bounds.bottom);
+                    candidate.identity=n; candidate.owner=n.owner; candidate.enabled=false;
+                    if(n.owner.staleStop) candidate.label="Stop";
+                }
+                result.add(candidate);
+            }
+            for (AccessibilityNodeInfo child:n.kids) findText(child,text,result);
+        }
         String getViewIdResourceName() { return id; }
         AccessibilityNodeInfo getParent() { return owner == null ? null : findParent(owner.root, this); }
         static AccessibilityNodeInfo findParent(AccessibilityNodeInfo n, AccessibilityNodeInfo target) {
@@ -82,7 +99,7 @@ public class PaseoServiceHarness {
         }
         boolean isFocused() { return focused; }
         boolean refresh() { refreshes++; now+=IPC;
-            if (identity != null && owner != null && identity == owner.send) enabled=owner.send.enabled;
+            if (identity != null && owner != null && identity == owner.send) { enabled=owner.send.enabled; label=owner.send.label; }
             if (onRefresh!=null) { Runnable r=onRefresh; onRefresh=null; r.run(); } return alive; }
         AccessibilityNodeInfo findFocus(int kind) { focuses++; now+=IPC; return focusedNode(this); }
         static AccessibilityNodeInfo focusedNode(AccessibilityNodeInfo n) {
@@ -121,9 +138,9 @@ public class PaseoServiceHarness {
     final PendingDictation mPendingDictation=new PendingDictation();
     AccessibilityNodeInfo root, editor, send, mPendingComposer, mFlowComposer;
     long mPendingPaseoId=-1; int mPaseoGeneration, mFlowWindow=-1, mPaseoAttempt;
-    long mPaseoDeadline; static final long PASEO_READY_TIMEOUT_MS=2000L;
+    long mPaseoDeadline; static final long PASEO_READY_TIMEOUT_MS=2000L, PASEO_SEND_READY_TIMEOUT_MS=5000L;
     PaseoSelection.Gate mFlowGate; String mFlowExpected, mFlowPackage;
-    Runnable mPaseoCheck; boolean mFlowDispatched; boolean mode=true, auto=true, reject, gestureEnabled, neverReset, staleCache, staleReadiness;
+    Runnable mPaseoCheck; boolean mFlowDispatched; boolean mode=true, auto=true, reject, gestureEnabled, neverReset, staleCache, staleReadiness, staleStop;
     int gestures;
     int echoDelay, focusDelay, childrenAtWrite, childrenAtClick; long idleAtWrite, idleAtClick; String feedback="sentinel";
     static final String TAG="test";
@@ -160,7 +177,7 @@ public class PaseoServiceHarness {
             for(int j=0;j<4;j++) row.kids.add(new AccessibilityNodeInfo("history text",0,0,400,400));
         }
         AccessibilityNodeInfo column=new AccessibilityNodeInfo("column",12,420,388,492);
-        s.editor=new AccessibilityNodeInfo(PaseoSelection.COMPOSER,24,428,376,452);
+        s.editor=new AccessibilityNodeInfo("Message agent...",24,428,376,452);
         s.editor.editable=true; s.editor.focused=true; s.editor.text="existing draft"; s.editor.owner=s;
         AccessibilityNodeInfo toolbar=new AccessibilityNodeInfo("toolbar",18,464,382,492);
         s.send=new AccessibilityNodeInfo("Send message",354,464,382,492); s.send.owner=s;
@@ -204,10 +221,10 @@ public class PaseoServiceHarness {
         s=fixture(false,1000); s.auto=false; s.complete(); s.mKeyHandler.run(); check(writes==1 && clicks==0 && children==0,"insert-only no traversal"); cases++;
         s=fixture(false,1000); s.echoDelay=25; s.complete(); check(writes==1 && clicks==0 && children==0,"no query before echo"); s.mKeyHandler.run();
         check(clicks==1 && clickAt<100000,"event wakes send before fallback timer"); cases++;
-        for(String label:new String[]{"Context window 50% used","Voice","Send"}) {
+        for(String label:new String[]{"Context window 50% used","Voice","Send feedback"}) {
             s=fixture(false,1000); s.send.label=label; s.complete(); s.mKeyHandler.run(); check(clicks==0 && writes==1,"not submit "+label); cases++;
         }
-        s=fixture(true,1000); s.root.kids.get(s.root.kids.size()-1).kids.add(new AccessibilityNodeInfo("Queue message",354,464,382,492)); s.complete(); s.mKeyHandler.run(); check(clicks==0,"ambiguous"); cases++;
+        s=fixture(true,1000); s.root.kids.get(s.root.kids.size()-1).kids.add(new AccessibilityNodeInfo("Queue message",354,464,382,492)); assignOwner(s.root,s); s.complete(); s.mKeyHandler.run(); check(clicks==0,"ambiguous"); cases++;
         s=fixture(false,1000); s.reject=true; s.complete(); s.mKeyHandler.run(); check(clicks==1 && writes==1,"rejected no retry"); cases++;
         s=fixture(false,1000); s.send.onRefresh=()->{}; final PaseoServiceHarness stale=s;
         s.send.onRefresh=()->stale.send.label="Voice"; s.complete(); s.mKeyHandler.run(); check(clicks==0,"changed action target refresh"); cases++;
@@ -225,14 +242,14 @@ public class PaseoServiceHarness {
         for(int i=0;i<100;i++) s.observePaseoFlow(); check(children==before,"event observations never traverse");
         s.onAccessibilityEvent(new AccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED,s.send)); s.send.enabled=true; s.mKeyHandler.run(); check(clicks==0,"manual submit cancels"); cases++;
         s=fixture(false,1000); s.echoDelay=-1; s.complete(); s.mKeyHandler.run(); check(writes==1 && clicks==0 && children==0 && s.feedback.contains("unconfirmed"),"unconfirmed timeout"); cases++;
-        s=fixture(false,1000); s.editor.text=PaseoSelection.COMPOSER; s.editor.hint=true; s.auto=false; s.complete(); s.mKeyHandler.run(); check(writes==1 && clicks==0,"hint handled"); cases++;
+        s=fixture(false,1000); s.editor.text="Message agent..."; s.editor.hint=true; s.auto=false; s.complete(); s.mKeyHandler.run(); check(writes==1 && clicks==0,"hint handled"); cases++;
         s=fixture(false,1000); s.mode=false; s.complete(); s.mKeyHandler.run(); check(writes==0,"mode off"); cases++;
         s=fixture(false,1000); s.insertCompletedRecording(41,"wrong recording"); check(writes==0 && children==0 && s.mPendingDictation.isPending(),"wrong recording preserves request"); s.complete(); check(writes==1 && clicks==1,"correct recording still completes"); cases++;
         for(int kind=0;kind<3;kind++) {
             s=fixture(false,1000);
             if(kind==0)s.root.pkg="other.app";
             if(kind==1)s.root.window=2;
-            if(kind==2){s.editor.label="different input";}
+            if(kind==2){s.editor.enabled=false;}
             s.complete(); s.mKeyHandler.run(); check(writes==0 && clicks==0,"destination changed before write "+kind); cases++;
         }
         s=fixture(false,1000); s.send.enabled=false; s.complete(); final PaseoServiceHarness ready=s;
@@ -241,7 +258,7 @@ public class PaseoServiceHarness {
         s=fixture(false,1000); final PaseoServiceHarness moved=s;
         s.send.onRefresh=()->moved.editor.bounds.bottom+=50; s.complete(); s.mKeyHandler.run(); check(clicks==1,"editor geometry is not a send contract"); cases++;
         s=fixture(true,1000); s.root.kids.get(s.root.kids.size()-1).kids.removeIf(n->n.label.equals("Voice")); s.complete(); s.mKeyHandler.run(); check(clicks==1,"exact local send survives optional peer absence"); cases++;
-        s=fixture(false,1000); AccessibilityNodeInfo duplicate=new AccessibilityNodeInfo(PaseoSelection.COMPOSER,24,428,376,452); duplicate.editable=true;
+        s=fixture(false,1000); AccessibilityNodeInfo duplicate=new AccessibilityNodeInfo("Message agent...",24,428,376,452); duplicate.editable=true; s.editor.focused=false;
         s.root.kids.add(duplicate); s.pasteIntoPaseo(s.root,"replacement"); s.mKeyHandler.run(); check(writes==0,"clipboard ambiguous composer"); cases++;
         System.out.println("production-method regressions passed="+cases);
     }
@@ -279,7 +296,7 @@ public class PaseoServiceHarness {
         s=fixture(false,0); s.send.enabled=false;
         s.complete(); s.mKeyHandler.run();
         check(clicks==0 && s.feedback.equals("Inserted — Send disabled"),"disabled Send terminates without dispatch");
-        check(now>=2000000 && now<2300000,"readiness respects the real two-second budget");
+        check(now>=5000000 && now<5300000,"readiness budget starts after echo and never extends on repeated events");
         s=fixture(false,0); s.staleCache=true; s.complete(); s.mKeyHandler.run();
         check(clicks==1,"cached tree draft cannot override refreshed exact echo");
         s=fixture(false,0); s.gestureEnabled=true; s.reject=true; s.complete(); s.mKeyHandler.run();
@@ -298,7 +315,43 @@ public class PaseoServiceHarness {
         PaseoServiceHarness s=fixture(false,0); s.staleReadiness=true; s.complete(); s.mKeyHandler.run();
         check(clicks==1,"cached Send readiness must be refreshed before rejecting the control");
     }
+    static void screenRegression() {
+        PaseoServiceHarness s=fixture(false,0);
+        s.root.kids.get(1).id=null;
+        s.complete(); s.mKeyHandler.run();
+        check(clicks==1,"missing application IDs must not prevent sending");
+        s=fixture(false,0); s.editor.label="Any focused draft"; s.send.label="Send";
+        s.complete(); s.mKeyHandler.run();
+        check(clicks==1,"generic focused input and Send must work");
+    }
+    static void timingRegression() {
+        for(boolean event:new boolean[]{false,true}) {
+            PaseoServiceHarness s=fixture(false,0); s.send.label="Stop"; s.staleStop=true;
+            final PaseoServiceHarness delayed=s;
+            s.complete(); check(clicks==0,"Stop must never activate");
+            s.mKeyHandler.postDelayed(()-> {
+                check(clicks==0,"no click before Stop becomes Send");
+                delayed.send.label="Send message";
+                if(event && delayed.mFlowComposer!=null) delayed.observePaseoFlow();
+            },3000);
+            s.mKeyHandler.run();
+            check(clicks==1,"delayed Stop-to-Send must be reread, not timed out");
+            check(clickAt>=3000000 && clickAt<3150000,"ready control sends immediately within poll interval");
+        }
+        PaseoServiceHarness s=fixture(false,0); s.echoDelay=1500; s.send.label="Stop";
+        final PaseoServiceHarness lateEcho=s;
+        s.complete();
+        s.mKeyHandler.postDelayed(()-> {lateEcho.send.label="Send message";},5500);
+        s.mKeyHandler.run();
+        check(clicks==1 && clickAt>=5500000 && clickAt<5650000,"readiness window starts at confirmed insertion, not before writing");
+        s=fixture(false,0); s.staleReadiness=true; s.complete(); s.mKeyHandler.run();
+        check(clicks==1,"cached readiness is refreshed");
+        s=fixture(false,0); s.complete();
+        check(clicks==1 && clickAt<100000,"already-ready control has no added delay");
+    }
     public static void main(String[] args) {
+        if(args[0].equals("screen")) { screenRegression(); return; }
+        if(args[0].equals("timing")) { timingRegression(); return; }
         if(args[0].equals("stale-readiness")) { staleReadinessRegression(); return; }
         if(args[0].equals("stale-cache")) { staleCacheRegression(); return; }
         if(args[0].equals("autosend")) { autosendRegressions(); return; }

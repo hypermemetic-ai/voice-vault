@@ -80,6 +80,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private long mPaseoDeadline;
     private boolean mFlowDispatched;
     private static final long PASEO_READY_TIMEOUT_MS = 2000L;
+    private static final long PASEO_SEND_READY_TIMEOUT_MS = 5000L;
     private SharedPreferences mModePrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener mModeListener = (prefs, key) -> {
         if (PREF_DICTATION_MODE.equals(key)) {
@@ -684,33 +685,64 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private static final class PaseoTree implements AutoCloseable {
         final PaseoSelection.Node root;
         final java.util.ArrayList<AccessibilityNodeInfo> owned = new java.util.ArrayList<>();
-        final boolean refresh;
-        PaseoTree(AccessibilityNodeInfo node) {
-            refresh = false;
-            root = visit(node, "", true);
-        }
-        // Paseo exposes a stable named composer ancestor. Read only that subtree,
-        // refreshing its child lists and controls rather than trusting cached readiness.
+        PaseoTree(AccessibilityNodeInfo node) { root = visit(node, "", true); }
+
+        // The Android screen is the contract. Query the nearest native input
+        // group with controls, including disabled controls that may become ready.
+        // A platform text query avoids walking every message in a flattened chat.
         PaseoTree(AccessibilityNodeInfo composer, AccessibilityNodeInfo application) {
-            refresh = true;
             PaseoSelection.Node found = null;
             AccessibilityNodeInfo parent = composer.getParent();
             for (int depth = 0; parent != null && depth < 32; depth++) {
                 owned.add(parent);
                 if (!parent.refresh() || parent.getWindowId() != application.getWindowId()
-                        || application.getPackageName() == null
-                        || !application.getPackageName().equals(parent.getPackageName())) break;
-                if (PaseoSelection.CONTAINER_ID.equals(parent.getViewIdResourceName())) {
-                    found = visit(parent, "", true);
-                    break;
+                        || parent.getPackageName() == null || application.getPackageName() == null
+                        || !application.getPackageName().toString().equals(parent.getPackageName().toString())) break;
+                PaseoSelection.Node scope = describe(parent);
+                scope.scoped = true;
+                scope.children.add(describe(composer));
+                for (String query : new String[] {"Send", "Queue", "Submit"}) {
+                    java.util.List<AccessibilityNodeInfo> results = parent.findAccessibilityNodeInfosByText(query);
+                    if (results == null) continue;
+                    for (AccessibilityNodeInfo result : results) {
+                        owned.add(result);
+                        if (!result.refresh() || result.getPackageName() == null
+                                || !application.getPackageName().toString().equals(result.getPackageName().toString())
+                                || result.getWindowId() != application.getWindowId()) continue;
+                        PaseoSelection.Node button = describe(result);
+                        if (button.editable || !button.visible || !button.clickable
+                                || !PaseoSelection.primary(button.label)) continue;
+                        boolean duplicate = false;
+                        for (PaseoSelection.Node child : scope.children)
+                            if (result.equals(child.handle)) { duplicate = true; break; }
+                        if (!duplicate && belongsTo(result, parent)) scope.children.add(button);
+                    }
                 }
-                if (parent.equals(application)) break;
-                parent = parent.getParent();
+                // Keep the nearest form even when its Send isn't mounted yet;
+                // don't escape to an unrelated Send elsewhere in the window.
+                if (scope.children.size() > 1 || hasControls(parent, composer, new int[] {128})
+                        || parent.equals(application)) { found = scope; break; }
+                AccessibilityNodeInfo next = parent.getParent();
+                if (depth == 31 && next != null) owned.add(next);
+                parent = next;
             }
-            // Recycle the unvisited parent if the depth limit was reached.
-            if (parent != null && !owned.contains(parent)) owned.add(parent);
             root = found;
         }
+
+        private static boolean hasControls(AccessibilityNodeInfo node, AccessibilityNodeInfo editor, int[] budget) {
+            if (--budget[0] < 0) return true; // uncertain boundary must not widen the search
+            for (int i = 0; i < node.getChildCount(); i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child == null) continue;
+                try {
+                    if (!child.refresh()) continue;
+                    if (!editor.equals(child) && child.isVisibleToUser() && !child.isEditable() && child.isClickable()) return true;
+                    if (hasControls(child, editor, budget)) return true;
+                } finally { child.recycle(); }
+            }
+            return false;
+        }
+
         private static PaseoSelection.Node describe(AccessibilityNodeInfo info) {
             PaseoSelection.Node n = new PaseoSelection.Node();
             Rect rect = new Rect();
@@ -718,7 +750,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             n.left = rect.left; n.top = rect.top; n.right = rect.right; n.bottom = rect.bottom;
             n.visible = info.isVisibleToUser() && !rect.isEmpty();
             n.enabled = info.isEnabled(); n.clickable = info.isClickable(); n.editable = info.isEditable();
-            n.id = info.getViewIdResourceName();
+            n.focused = info.isFocused();
             CharSequence desc = info.getContentDescription();
             CharSequence hint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? info.getHintText() : null;
             CharSequence text = info.getText();
@@ -731,7 +763,6 @@ public class VoiceVaultKeyService extends AccessibilityService {
             return n;
         }
         private PaseoSelection.Node visit(AccessibilityNodeInfo info, String path, boolean visible) {
-            if (refresh && !info.refresh()) return new PaseoSelection.Node();
             PaseoSelection.Node n = describe(info);
             n.path = path;
             n.visible &= visible;
@@ -756,7 +787,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
         pasteIntoPaseo(initialRoot, transcript, null);
     }
 
-    /** Fresh focused native identity is sufficient only after unique discovery. */
+    /** Require the same fresh native input identity as the OS focus. */
     private PaseoSelection.Node currentComposer(AccessibilityNodeInfo root, AccessibilityNodeInfo saved) {
         if (root == null || saved == null || !saved.refresh()
                 || saved.getWindowId() != root.getWindowId()
@@ -764,7 +795,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 || !saved.getPackageName().equals(root.getPackageName())) return null;
         PaseoSelection.Node editor = PaseoTree.describe(saved);
         if (!editor.editable || !editor.visible || !editor.enabled
-                || !PaseoSelection.COMPOSER.equals(editor.label) || !saved.isFocused()) return null;
+                || !saved.isFocused()) return null;
         AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
         try { return saved.equals(focused) ? editor : null; }
         finally { if (focused != null) focused.recycle(); }
@@ -783,8 +814,15 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (validated != null && currentComposer(initialRoot, validated) != null) {
                 mFlowComposer = AccessibilityNodeInfo.obtain(validated);
             } else {
-                // Clipboard or genuinely unfocused/uncertain input: discover once.
-                try (PaseoTree tree = new PaseoTree(initialRoot)) {
+                // The OS input focus is authoritative for clipboard insertion too.
+                AccessibilityNodeInfo focused = initialRoot.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                try {
+                    if (validated == null && currentComposer(initialRoot, focused) != null) {
+                        mFlowComposer = AccessibilityNodeInfo.obtain(focused);
+                    }
+                } finally { if (focused != null) focused.recycle(); }
+                // Only genuinely unfocused/uncertain input needs discovery.
+                if (mFlowComposer == null) try (PaseoTree tree = new PaseoTree(initialRoot)) {
                     PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
                     if (editor == null || (validated != null && !validated.equals(editor.handle))) {
                         paseoFeedback("Copied — composer unavailable"); return;
@@ -835,6 +873,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (!mFlowGate.write(editor.text) || !mFlowComposer.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
                 paseoFeedback("Copied — insertion unavailable"); return;
             }
+            // Insertion confirmation has its own budget after the write returns.
+            mPaseoDeadline = SystemClock.uptimeMillis() + PASEO_READY_TIMEOUT_MS;
             // Check exact accessibility echo immediately; delayed RN readiness is
             // event-driven with a single bounded fallback timer, not mandatory sleep.
             FloatingPillOverlay.showFeedback(this, isAutoSendEnabled() ? "Inserted — finding Send" : "Inserted — auto-send OFF", false);
@@ -853,7 +893,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (!validPaseo(generation, pkg, window, root)) { cancelPaseoFlow(); return; }
             PaseoSelection.Node fresh = currentComposer(root, mFlowComposer);
             if (fresh == null) { cancelPaseoFlow(); return; }
-            mFlowGate.observe(fresh, expected);
+            observePaseoDraft(fresh, expected);
             if (mFlowGate.isCanceled()) { cancelPaseoFlow(); return; }
             // No toolbar query at all before exact echo, or for insertion-only.
             boolean needToolbar = expected.equals(fresh.text) && isAutoSendEnabled();
@@ -881,12 +921,13 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     // Refresh the actual action target and editor immediately. A
                     // changed label/geometry/readiness needs a new bounded check.
                     if (!target.refresh() || !sameButton(button, PaseoTree.describe(target))
-                            || !belongsTo(target, (AccessibilityNodeInfo) tree.root.handle)) {
+                            || !belongsTo(target, (AccessibilityNodeInfo) tree.root.handle)
+                            || !belongsTo(mFlowComposer, (AccessibilityNodeInfo) tree.root.handle)) {
                         schedulePaseoCheck(generation, pkg, window, expected, 100);
                         return;
                     }
                     PaseoSelection.Node echo = currentComposer(root, mFlowComposer);
-                    mFlowGate.observe(echo, expected);
+                    observePaseoDraft(echo, expected);
                     if (echo == null || !expected.equals(echo.text) || mFlowGate.isCanceled()) {
                         cancelPaseoFlow(); return;
                     }
@@ -997,6 +1038,15 @@ public class VoiceVaultKeyService extends AccessibilityService {
         paseoFeedback(dispatched ? "Send not confirmed — check Paseo" : "Auto-send canceled");
     }
 
+    /** Give React its readiness budget once, after exact native insertion echo. */
+    private void observePaseoDraft(PaseoSelection.Node editor, String expected) {
+        boolean hadEcho = mFlowGate.hasEcho();
+        mFlowGate.observe(editor, expected);
+        if (!hadEcho && mFlowGate.hasEcho()) {
+            mPaseoDeadline = SystemClock.uptimeMillis() + PASEO_SEND_READY_TIMEOUT_MS;
+        }
+    }
+
     /** Observe fresh native identity/text, not a stale event payload or path/bounds. */
     private void observePaseoFlow() {
         AccessibilityNodeInfo root = getApplicationRoot();
@@ -1005,7 +1055,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 cancelPaseoFlow(); return;
             }
             if (mFlowDispatched) { confirmPaseo(mPaseoGeneration, mFlowPackage, mFlowWindow, mFlowExpected); return; }
-            mFlowGate.observe(currentComposer(root, mFlowComposer), mFlowExpected);
+            observePaseoDraft(currentComposer(root, mFlowComposer), mFlowExpected);
             if (mFlowGate.isCanceled()) { cancelPaseoFlow(); return; }
             // Coalesce bursts; observation itself never walks history or toolbar.
             // Pull the pending readiness check forward without resetting its budget.

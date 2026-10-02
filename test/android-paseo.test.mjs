@@ -43,7 +43,8 @@ test('native path is isolated from generic multi-send and retains clipboard/hist
   assert.match(s, /mFlowGate\.check\(tree == null \? null : tree\.root, editor, expected,/);
   assert.match(s, /target\.refresh\(\)/);
   assert.match(s, /new PaseoTree\(mFlowComposer, root\)/);
-  assert.match(s, /getViewIdResourceName\(\)/);
+  assert.match(s, /findAccessibilityNodeInfosByText\(query\)/);
+  assert.doesNotMatch(s, /CONTAINER_ID|message-input-root/);
   assert.match(s, /belongsTo\(target/);
   const observation = s.split('private void observePaseoFlow()')[1].split('private CharSequence readPasteText')[0];
   assert.doesNotMatch(observation, /new PaseoTree/);

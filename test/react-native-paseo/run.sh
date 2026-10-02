@@ -78,7 +78,7 @@ trap cleanup EXIT
 "${ADB[@]}" shell appops set sh.paseo.debug SYSTEM_ALERT_WINDOW allow
 "${ADB[@]}" shell settings delete secure enabled_accessibility_services
 "${ADB[@]}" logcat -c
-ARGS=(); [[ -z "${VV_RN_REV:-}" ]] || ARGS=(-e baseline true)
+ARGS=(); [[ -z "${VV_RN_REV:-}" ]] || ARGS=(-e baseline "${VV_RN_BASELINE:-true}")
 timeout --kill-after=5s 120s "${ADB[@]}" shell am instrument "${ARGS[@]}" -w sh.paseo.debug/ai.hypermemetic.voicevault.PaseoFixtureTest | tee "$WORK/instrumentation.log"
 "${ADB[@]}" logcat -d > "$WORK/logcat.log"
 rg -q 'OK React Native cases=' "$WORK/instrumentation.log"

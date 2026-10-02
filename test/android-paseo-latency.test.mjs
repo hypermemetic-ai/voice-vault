@@ -112,3 +112,29 @@ test('production Paseo methods: same long-tree before/after query/timer model an
     }
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
+
+for (const mode of ['screen', 'timing']) test(`release 1.2.18 reproduces ${mode} failure; repair passes`, () => {
+  const out = mkdtempSync(path.join(tmpdir(), 'paseo-screen-'));
+  try {
+    for (const revision of ['88b3217', 'current']) {
+      const read = file => revision === 'current' ? readFileSync(file, 'utf8')
+        : spawnSync('git', ['show', `${revision}:${file}`], {encoding: 'utf8'}).stdout;
+      const source = read(service);
+      const methods = between(source, '    private void insertCompletedRecording(', '    /** An IME')
+        + between(source, '    private void clearPendingComposer()', '    private CharSequence readPasteText(')
+        + between(source, '    public void onAccessibilityEvent(', '    @Override\n    public void onInterrupt()');
+      const file = path.join(out, 'PaseoServiceHarness.java');
+      const gate = path.join(out, 'PaseoSelection.java');
+      writeFileSync(gate, read(`${sourceDir}PaseoSelection.java`));
+      writeFileSync(file, readFileSync('test/fixtures/PaseoServiceHarness.java', 'utf8').replace('    // PRODUCTION_METHODS', methods));
+      const compile = spawnSync('javac', ['--release', '11', '-d', out, gate, `${sourceDir}PendingDictation.java`, file], {encoding: 'utf8'});
+      assert.equal(compile.status, 0, compile.stderr);
+      const run = spawnSync('java', ['-cp', out, 'ai.hypermemetic.voicevault.PaseoServiceHarness', mode], {encoding: 'utf8'});
+      if (revision === 'current') assert.equal(run.status, 0, run.stderr);
+      else {
+        assert.notEqual(run.status, 0, 'previous release must reproduce failure');
+        assert.match(run.stderr, mode === 'screen' ? /missing application IDs/ : /delayed Stop-to-Send/);
+      }
+    }
+  } finally { rmSync(out, {recursive: true, force: true}); }
+});

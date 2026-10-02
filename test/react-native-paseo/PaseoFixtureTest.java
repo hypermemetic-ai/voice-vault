@@ -12,7 +12,7 @@ import java.lang.reflect.Method;
 /** Real React Native bridge, with mock submission only. Run on a disposable emulator. */
 public class PaseoFixtureTest extends Instrumentation {
     VoiceVaultKeyService service;
-    boolean baseline;
+    boolean baseline, missingControls;
     int submissions, cases;
     void report(String message) { Bundle b = new Bundle(); b.putString("stream", message + "\n"); sendStatus(0, b); }
     void check(boolean condition, String detail) { if (!condition) throw new AssertionError(detail); }
@@ -57,7 +57,7 @@ public class PaseoFixtureTest extends Instrumentation {
             try { invoke("pasteIntoFocusedField", new Class<?>[] {String.class}, text); }
             catch (Exception e) { throw new RuntimeException(e); }
         });
-        long deadline = SystemClock.uptimeMillis() + 3200;
+        long deadline = SystemClock.uptimeMillis() + 7200;
         while (SystemClock.uptimeMillis() < deadline && !terminal.equals(feedback())) SystemClock.sleep(40);
         check(terminal.equals(feedback()), name + " unexpected status: " + feedback());
         if (sends) submissions++;
@@ -67,7 +67,7 @@ public class PaseoFixtureTest extends Instrumentation {
         check(field(VoiceVaultKeyService.class, "mFlowComposer", service) == null, "Flow still pending");
         cases++; report("PASS " + name + " callbacks=" + submissions + " feedback=" + terminal);
     }
-    @Override public void onCreate(Bundle args) { super.onCreate(args); baseline = args != null && "true".equals(args.getString("baseline")); start(); }
+    @Override public void onCreate(Bundle args) { super.onCreate(args); baseline = args != null && "true".equals(args.getString("baseline")); missingControls = args != null && "controls".equals(args.getString("baseline")); start(); }
     @Override public void onStart() {
         Bundle finalResult = new Bundle();
         try {
@@ -86,7 +86,9 @@ public class PaseoFixtureTest extends Instrumentation {
                     .putBoolean("pref_dictation_mode_enabled", true).putBoolean("pref_auto_send_on_paste", true).commit());
             getTargetContext().startActivity(new Intent().setClassName("sh.paseo", "sh.paseo.MainActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             SystemClock.sleep(3000);
-            if (baseline) {
+            if (missingControls) {
+                attempt("1.2.18 requires missing app ID", "synthetic draft", "Inserted — composer controls unavailable", false);
+            } else if (baseline) {
                 attempt("1.2.17 standard", "standard synthetic draft", "Submitted to Paseo", true);
                 control("Move Send");
                 attempt("1.2.17 moved rejects functional Send", "moved synthetic draft", "Inserted — send manually", false);
@@ -99,6 +101,20 @@ public class PaseoFixtureTest extends Instrumentation {
                     }
                     control("Next label");
                 }
+                control("Rename input");
+                attempt("arbitrary input label", "focused generic draft", "Submitted to Paseo", true);
+                control("Delay Send");
+                long delayedStart = SystemClock.uptimeMillis();
+                attempt("same RN control Stop becomes Send after 3 seconds", "delayed draft", "Submitted to Paseo", true);
+                check(SystemClock.uptimeMillis() - delayedStart < 4500, "Ready Send waited unnecessarily");
+                AccessibilityNodeInfo delayedRoot = root();
+                try {
+                    for (AccessibilityNodeInfo n : delayedRoot.findAccessibilityNodeInfosByText("Stop result")) {
+                        try { check("Stop activations: 0".contentEquals(n.getText()), "Stop activated instead of Send"); }
+                        finally { n.recycle(); }
+                    }
+                } finally { delayedRoot.recycle(); }
+                control("Delay Send");
                 control("Disable Send");
                 attempt("disabled RN Pressable", "disabled draft", "Inserted — Send disabled", false);
                 control("Reset draft"); control("Disable Send"); control("Duplicate Send");

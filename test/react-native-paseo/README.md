@@ -9,12 +9,12 @@ refuses a physical serial or an emulator already containing either Paseo package
 Both test packages are uninstalled and accessibility settings restored on exit.
 The test host APK must never be published or installed on a phone.
 
-The stable `message-input-root` testID, text input label, four primary labels and
-mobile Pressable match Paseo's composer/input/input.tsx and tooltip.tsx at
-5599f9e567128a1240b3b15afab28bceef9d36a5. The actual RN bridge, conditional mounting
-of Send after SET_TEXT, native accessibility export, semantic ACTION_CLICK and
-mock submit callback run on Android. This is **not the full Paseo JavaScript,
-a daemon/server delivery test, or verification of the operator's phone**.
+The synthetic composer uses no application view IDs and can change its input
+label. The actual RN bridge, conditional mounting of Send after SET_TEXT,
+native accessibility export, semantic ACTION_CLICK and mock callback run on
+Android. A circular control can remain Stop for three seconds after insertion,
+then change to Send on the same native node. No Stop activation is allowed.
+This is **not full Paseo JavaScript, server delivery, or phone verification**.
 
 Use a clean, disposable, booted API34 emulator. Prepare optional libraries and
 host **outside this repository**; no project dependency, Gradle/native RN build,
@@ -32,8 +32,8 @@ VV_RN_WORK="$VV_RN_WORK" VV_EMULATOR_SERIAL=emulator-5580 bash test/react-native
 
 The runner verifies the pinned host SHA256
 `1f174879b2bb761cd689b7743d1eac91fa0513f6df803ad31d4baa7409eb6580`.
-Expect 18 cases: four primary labels × original/moved layout × short/multiline,
-plus disabled and ambiguous RN controls. Each successful case asserts exactly
+Expect 20 cases: four primary labels × original/moved layout × short/multiline,
+plus an arbitrary input label, delayed Stop-to-Send, disabled and ambiguous controls. Each successful case asserts exactly
 one callback containing the exact synthetic draft. Result/build/log files stay
 in VV_RN_WORK, never public/.
 
@@ -45,3 +45,10 @@ The separate JVM regression pins the same release and demonstrates a cached
 `enabled=false` child snapshot preventing selection until the native control is
 refreshed. It is a controlled cache reproduction, not a claim that the phone's
 current failure has been diagnosed.
+
+To reproduce the 1.2.18 dependency on an absent app-specific composer ID, run
+with `VV_RN_REV=88b3217 VV_RN_BASELINE=controls`. The same synthetic UI inserts
+but reports `Inserted — composer controls unavailable` without submitting.
+The JVM timing regression separately reproduces its two-second timeout with a
+three-second Stop-to-Send transition, then verifies immediate activation when
+ready, including stale cached control state and delayed exact insertion echo.
