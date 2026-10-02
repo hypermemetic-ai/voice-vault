@@ -16,10 +16,10 @@ public class PaseoHarness {
             root = node("screen", 0, 0, 400 * scale, 900 * scale);
             column = node("inputWrapper", 12 * scale, y * scale, 388 * scale,
                     (y + inputHeight + 12 + 28 + 8) * scale);
-            column.id = PaseoSelection.CONTAINER_ID;
-            editor = node(PaseoSelection.COMPOSER, 24 * scale, (y + 8) * scale,
+            column.scoped = true;
+            editor = node("Message agent...", 24 * scale, (y + 8) * scale,
                     376 * scale, (y + 8 + inputHeight) * scale);
-            editor.editable = true;
+            editor.editable = true; editor.focused = true;
             toolbar = node("buttonRow", 18 * scale, editor.bottom + 12 * scale,
                     382 * scale, editor.bottom + 40 * scale);
             // The row's negative horizontal margin may put the control 6 units
@@ -42,7 +42,7 @@ public class PaseoHarness {
             for (int height : new int[] {20, 120}) {
                 Fixture f = new Fixture(y, height, scale);
                 check(PaseoSelection.composer(f.root) == f.editor);
-                for (String label : new String[] {"Send message", "Queue message", "Send and interrupt", "Send and steer"}) {
+                for (String label : new String[] {"Send message", "Queue message", "Send and interrupt", "Send and steer", "Send", "Queue", "Submit"}) {
                     f.send.label = label;
                     check(PaseoSelection.submit(f.root, f.editor) == f.send);
                     f.send.enabled = false; check(PaseoSelection.submit(f.root, f.editor) == null); f.send.enabled = true;
@@ -52,7 +52,7 @@ public class PaseoHarness {
                     f.toolbar.children.add(duplicate); check(PaseoSelection.submit(f.root, f.editor) == null);
                     f.toolbar.children.remove(duplicate);
                 }
-                for (String label : new String[] {"Context window 50% used", "Stop", "Voice", "Submit", "Send", "Send message tooltip"}) {
+                for (String label : new String[] {"Context window 50% used", "Stop", "Voice", "Send message tooltip"}) {
                     f.send.label = label; check(PaseoSelection.submit(f.root, f.editor) == null);
                 }
                 f.send.label = "Send message";
@@ -62,8 +62,8 @@ public class PaseoHarness {
                 f.send.top -= 100 * scale; f.send.bottom -= 100 * scale;
                 check(PaseoSelection.submit(f.root, f.editor) == f.send); // moving within the composer is harmless
                 f.send.top += 100 * scale; f.send.bottom += 100 * scale;
-                PaseoSelection.Node copy = node(PaseoSelection.COMPOSER, f.editor.left, f.editor.top, f.editor.right, f.editor.bottom);
-                copy.editable = true; f.column.children.add(copy); check(PaseoSelection.composer(f.root) == null);
+                PaseoSelection.Node copy = node("Message agent...", f.editor.left, f.editor.top, f.editor.right, f.editor.bottom);
+                copy.editable = true; copy.focused = true; f.column.children.add(copy); check(PaseoSelection.composer(f.root) == null);
                 f.column.children.remove(copy);
                 f.editor.enabled = false; check(PaseoSelection.composer(f.root) == null);
             }
@@ -81,14 +81,14 @@ public class PaseoHarness {
         check(PaseoSelection.submit(f.root, f.editor) == f.send); // optional peers do not identify the action
         f.send.top += 100; f.send.bottom += 100;
         check(PaseoSelection.submit(f.root, f.editor) == f.send); // geometry cannot break the semantic relationship
-        f.column.id = null; check(PaseoSelection.submit(f.root, f.editor) == null);
-        check(PaseoSelection.unavailable(f.root, f.editor).contains("composer controls unavailable"));
-        f.column.id = PaseoSelection.CONTAINER_ID;
+        f.column.scoped = false; check(PaseoSelection.submit(f.root, f.editor) == null);
+        check(PaseoSelection.unavailable(f.root, f.editor).contains("controls unavailable"));
+        f.column.scoped = true;
         f.send.enabled = false; check(PaseoSelection.unavailable(f.root, f.editor).contains("Send disabled"));
     }
     static void flow() {
         Fixture f = new Fixture(420, 20, 1);
-        String hint = PaseoSelection.COMPOSER, expected = "replacement";
+        String hint = "Message agent...", expected = "replacement";
         check(PaseoSelection.draftText(true, true, hint).isEmpty());
         check(PaseoSelection.draftText(true, true, "other placeholder").isEmpty());
         check(PaseoSelection.draftText(true, false, null).isEmpty());

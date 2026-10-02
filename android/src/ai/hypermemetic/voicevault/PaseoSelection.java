@@ -3,10 +3,8 @@ package ai.hypermemetic.voicevault;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Conservative, source-label-based selection. No substring or ancestor click matching. */
+/** Screen semantics and native input identity; no application view IDs or layout rules. */
 final class PaseoSelection {
-    static final String COMPOSER = "Message agent...";
-    static final String CONTAINER_ID = "message-input-root";
     /** An editable node showing its platform hint has no user draft, even if getText returns the hint. */
     static String draftText(boolean editable, boolean showingHintText, CharSequence text) {
         return (editable && showingHintText) || text == null ? "" : text.toString();
@@ -15,12 +13,13 @@ final class PaseoSelection {
         return "sh.paseo".equals(pkg) || "sh.paseo.debug".equals(pkg);
     }
     static boolean primary(String label) {
-        return "Send message".equals(label) || "Queue message".equals(label)
+        return "Send".equals(label) || "Submit".equals(label) || "Queue".equals(label)
+                || "Send message".equals(label) || "Queue message".equals(label)
                 || "Send and interrupt".equals(label) || "Send and steer".equals(label);
     }
     static final class Node {
-        String label, text, id;
-        boolean editable, visible, enabled, clickable;
+        String label, text;
+        boolean editable, visible, enabled, clickable, focused, scoped;
         int left, top, right, bottom;
         String path;
         List<Node> children = new ArrayList<>();
@@ -29,7 +28,9 @@ final class PaseoSelection {
     }
     static Node composer(Node root) {
         List<Node> matches = new ArrayList<>();
-        collect(root, n -> n.editable && n.visible && n.enabled && COMPOSER.equals(n.label), matches);
+        collect(root, n -> n.editable && n.visible && n.enabled && n.focused, matches);
+        if (!matches.isEmpty()) return matches.size() == 1 ? matches.get(0) : null;
+        collect(root, n -> n.editable && n.visible && n.enabled, matches);
         return matches.size() == 1 ? matches.get(0) : null;
     }
     static Node submit(Node root, Node editor) {
@@ -43,7 +44,7 @@ final class PaseoSelection {
     private static Node owner(Node root, Node editor) {
         if (editor == null) return null;
         List<Node> owners = new ArrayList<>();
-        collect(root, n -> n.visible && CONTAINER_ID.equals(n.id) && contains(n, editor), owners);
+        collect(root, n -> n.scoped && contains(n, editor), owners);
         return owners.size() == 1 ? owners.get(0) : null;
     }
     private static boolean contains(Node node, Node editor) {
@@ -53,7 +54,7 @@ final class PaseoSelection {
     }
     static String unavailable(Node root, Node editor) {
         Node owner = owner(root, editor);
-        if (owner == null) return "Inserted — composer controls unavailable";
+        if (owner == null) return "Inserted — controls unavailable";
         List<Node> buttons = new ArrayList<>();
         collect(owner, n -> !n.editable && n.visible && n.clickable && primary(n.label), buttons);
         int enabled = 0;

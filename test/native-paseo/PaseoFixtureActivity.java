@@ -53,13 +53,6 @@ public class PaseoFixtureActivity extends Activity {
         screen.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
         column = new LinearLayout(this); column.setOrientation(LinearLayout.VERTICAL);
         column.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
-        column.setAccessibilityDelegate(new View.AccessibilityDelegate() {
-            @Override public void onInitializeAccessibilityNodeInfo(View host,
-                    android.view.accessibility.AccessibilityNodeInfo info) {
-                super.onInitializeAccessibilityNodeInfo(host, info);
-                info.setViewIdResourceName("message-input-root");
-            }
-        });
         column.setPadding(dp(12), dp(8), dp(12), dp(8));
         // Background keeps RN's inputWrapper from being a layout-only collapsed view.
         column.setBackgroundColor(0xffeeeeee);
@@ -95,8 +88,8 @@ public class PaseoFixtureActivity extends Activity {
                 return super.performAccessibilityAction(action, args);
             }
         };
-        editor.setId(View.generateViewId()); editor.setHint(PaseoSelection.COMPOSER);
-        editor.setContentDescription(PaseoSelection.COMPOSER);
+        editor.setId(View.generateViewId()); editor.setHint("Message agent...");
+        editor.setContentDescription("Message agent...");
         editor.setPadding(0, 0, 0, 0); editor.setTextSize(14); editor.setText(text);
         editor.setSingleLine(false);
         column.addView(editor, 0, new LinearLayout.LayoutParams(-1, dp(multiline ? 120 : 24)));

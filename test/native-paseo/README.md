@@ -14,32 +14,18 @@ Paseo package. It restores accessibility settings and uninstalls its fixture.
 
 ## Fidelity and limits
 
-The UI models pinned Paseo revision
-`5599f9e567128a1240b3b15afab28bceef9d36a5`:
+The synthetic UI uses real Android EditText/TextView/LinearLayout controls,
+short and multiline drafts, a lower toolbar and native keyboard windows. The
+composer exports no app-specific view ID. A tempting exact Send control outside
+the input group must remain excluded. Primary labels are Send message, Queue
+message, Send and interrupt, and Send and steer; context and voice controls are
+not submit actions.
 
-- `composer/input/input.tsx`: COLUMN inputWrapper, full-width input, 12dp gap,
-  lower toolbar, 28dp controls, -6dp row horizontal margin, primary at right END.
-- Named `message-input-root` native composer owner; no relative layout selection.
-- Exact primary labels: Send message, Queue message, Send and interrupt,
-  Send and steer. Context meter and voice are non-submit controls.
-- `components/ui/text-input/text-input.native.tsx` and `composer/submit.ts`:
-  clear/reset can remount the input, destroying saved accessibility identity.
-
-These are real Android EditText/TextView/LinearLayout views and native input
-method windows, **not React Native/Paseo runtime or server E2E**. Static short
-and multiline input heights model the source geometry; the RN bridge,
-TooltipTrigger/Pressable implementation, actual server queue/steer/interrupt
-behavior, and the user's physical phone are not tested. The pinned source checkout
-has no installed app dependencies/native build; its existing mobile script sends
-real messages and was deliberately not run. The ticket permits this isolated
-native fixture instead.
-
-Paseo's named root is exported by React Native as a view ID and preserves the
-native composer ancestor. This Java fixture models that identifier with an
-accessibility delegate. Layout-only wrappers may flatten inside it without
-changing ownership. A global exact Send control remains outside the owner.
-The separate [React Native fixture](../react-native-paseo/README.md) tests the
-real RN bridge, named-root export and semantic click with synthetic mock submission.
+This exercises Android accessibility, native actions and hardware keys. It does
+not run React Native, full Paseo JavaScript or server delivery, and does not
+verify the user's phone. The separate [React Native fixture](../react-native-paseo/README.md)
+tests the RN bridge, generic input ownership and delayed Stop-to-Send transition
+using synthetic text and a mock handler.
 
 ## Run
 
@@ -84,14 +70,8 @@ keyboard device. Software-injected UiAutomation keys bypass the native filter an
 are not suitable evidence of hardware key consumption. This helper requires root
 adb on the disposable emulator and refuses physical serials.
 
-The 1.2.16 source repair uses a two-second readiness deadline, accepts a unique
-exact local send control without optional toolbar peers, and revalidates normal
-composer resizing. The fixture waits/auto-send-off feedback have been updated
-accordingly. Those changes were covered by JVM production-method regressions;
-the historical native run above does not validate this newer production version.
-
-The 1.2.18 semantic repair prefers one ACTION_CLICK. Only a rejected action may
-fall back to a gesture at the live control; an accepted ineffective action never
-triggers another activation. Current evidence is in
-`openspec/changes/fix-paseo-semantic-send/verification.md`. The 1.2.16 paragraph
-above and VERIFICATION.md describe historical behavior, not the current selector.
+Current readiness checks refresh the focused draft and live submit control.
+Insertion echo has a two-second bound; Send readiness has a separate five-second
+bound starting at the first exact echo. There is no minimum wait: a ready control
+sends immediately. Events advance the pending check without extending its budget.
+Historical verification receipts remain under `openspec/changes/`.

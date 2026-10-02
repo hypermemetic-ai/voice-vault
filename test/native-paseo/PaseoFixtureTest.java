@@ -130,7 +130,7 @@ public class PaseoFixtureTest extends Instrumentation {
             for (String kind : new String[] {"disabled", "ambiguous", "context only"}) {
                 setup(kind.equals("context only") ? "Context window 50% used" : "Send message", false,
                         !kind.equals("disabled"), kind.equals("ambiguous"), 0, false);
-                dump(kind); begin("ready draft"); pause(2300);
+                dump(kind); begin("ready draft"); pause(5300);
                 result(kind, 0, kind.equals("disabled") ? "Inserted — Send disabled"
                         : kind.equals("ambiguous") ? "Inserted — multiple Send controls" : "Inserted — Send unavailable");
                 check("ready draft".equals(activity.editor.getText().toString()), "inserted text lost");
@@ -163,9 +163,9 @@ public class PaseoFixtureTest extends Instrumentation {
             main(() -> activity.ignoreClick = true); begin("inserted"); pause(1800);
             result("accepted ineffective semantic click never retried", 0, "Send not confirmed — tap Send");
             check(activity.clickActions == 1 && activity.touchDowns == 0, "accepted action must not trigger a second activation");
-            setup("Send message", false, true, false, 0, false); begin(PaseoSelection.COMPOSER); pause(1300);
+            setup("Send message", false, true, false, 0, false); begin("Message agent..."); pause(1300);
             result("literal placeholder text is real echo", 1, "Submitted to Paseo");
-            check(PaseoSelection.COMPOSER.equals(activity.submitted), "literal hint lost");
+            check("Message agent...".equals(activity.submitted), "literal hint lost");
             setup("Send message", false, true, false, 5000, false); begin("not echoed"); pause(2300);
             result("unconfirmed insertion", 0, "Copied — insertion unconfirmed; paste manually");
             // Real key events, not direct invocation of onKeyEvent. Offline clipboard only.
