@@ -2,6 +2,9 @@ package ai.hypermemetic.voicevault;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.media.MediaPlayer;
+import android.widget.Toast;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -71,6 +74,8 @@ public class MainActivity extends Activity {
     private LinearLayout mDrawerPanel;
     private LinearLayout mLayoutHistoryContainer;
     private boolean mDrawerOpen = false;
+    private MediaPlayer mHistoryPlayer;
+    private int mAudioGeneration;
 
     private Handler mHandler;
     private Runnable mTimerUpdater;
@@ -533,7 +538,7 @@ public class MainActivity extends Activity {
         topRow.addView(spacer, spacerLp);
 
         TextView tvCopyBadge = new TextView(this);
-        tvCopyBadge.setText("COPY");
+        tvCopyBadge.setText(entry.transcript.isEmpty() ? "" : "COPY");
         tvCopyBadge.setTextColor(Color.parseColor("#555555"));
         tvCopyBadge.setTextSize(10f);
         try {
@@ -545,7 +550,7 @@ public class MainActivity extends Activity {
 
         // Transcript Text
         TextView tvTranscript = new TextView(this);
-        tvTranscript.setText(entry.transcript);
+        tvTranscript.setText(entry.transcript.isEmpty() ? HistoryManager.statusLabel(entry) : entry.transcript);
         tvTranscript.setTextColor(Color.parseColor("#EEEEEE"));
         tvTranscript.setTextSize(13.5f);
         tvTranscript.setLineSpacing(0, 1.25f);
@@ -559,8 +564,29 @@ public class MainActivity extends Activity {
         textLp.topMargin = Math.round(6 * density);
         card.addView(tvTranscript, textLp);
 
-        // 1-Tap Copy Action
+        TextView status=new TextView(this);status.setText(HistoryManager.statusLabel(entry)+(entry.audioAvailable ? "" : " · audio unavailable"));
+        status.setTextColor(Color.parseColor("#999999"));status.setTextSize(11);card.addView(status);
+        LinearLayout actions=new LinearLayout(this);actions.setOrientation(LinearLayout.VERTICAL);card.addView(actions);
+        boolean busy=entry.status.equals("recording") || entry.status.equals("processing");
+        addHistoryAction(actions,"Play original",entry.audioAvailable && !busy,()->retrieveAudio(entry,false));
+        addHistoryAction(actions,"Export original",entry.audioAvailable && !busy,()->retrieveAudio(entry,true));
+        boolean resolved=entry.status.equals("transcribed") || entry.status.equals("no_speech") || entry.status.equals("speaker_rejected");
+        if(!resolved && !entry.cleanupPending)addHistoryAction(actions,"Retry transcription",entry.audioAvailable && !busy && !VoiceVaultService.isRecording() && !VoiceVaultService.isProcessing(),()->{
+            Intent recovery=new Intent(this,VoiceVaultService.class).setAction(VoiceVaultService.ACTION_RECOVER);
+            recovery.putExtra(VoiceVaultService.EXTRA_RECORDING_ID,entry.localId);startService(recovery);
+        });
+        if(entry.localId.equals(VoiceVaultService.getRecoveryId()) && !entry.localId.isEmpty())addHistoryAction(actions,"Cancel transcription",true,()->startService(new Intent(this,VoiceVaultService.class).setAction(VoiceVaultService.ACTION_CANCEL)));
+        if(!entry.transcript.isEmpty())addHistoryAction(actions,"Copy",true,card::performClick);
+        addHistoryAction(actions,entry.cleanupPending ? "Retry deletion" : "Delete",!busy,()->new AlertDialog.Builder(this)
+            .setTitle("Delete this recording?").setMessage("Remove its saved audio and History entry. Export first if you want a copy.")
+            .setNegativeButton("Keep",null).setPositiveButton("Delete",(dialog,which)->{
+                stopHistoryPlayback();mProfileExecutor.execute(()->{boolean complete=HistoryManager.delete(this,entry);
+                    mHandler.post(()->{Toast.makeText(this,complete ? "Recording deleted" : "Deletion incomplete — retry from History",Toast.LENGTH_LONG).show();loadHistoryIntoDrawer();});});
+            }).show());
+
+        // A tap on a transcript is an explicit copy action; blank recordings never copy.
         card.setOnClickListener(v -> {
+            if(entry.transcript.isEmpty())return;
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             if (cm != null) {
                 ClipData clip = ClipData.newPlainText("Voice Vault", entry.transcript);
@@ -598,6 +624,38 @@ public class MainActivity extends Activity {
         return card;
     }
 
+    private void addHistoryAction(LinearLayout row,String title,boolean enabled,Runnable action) {
+        Button button=new Button(this);button.setText(title);button.setEnabled(enabled);button.setOnClickListener(v->action.run());row.addView(button);
+    }
+    private void retrieveAudio(HistoryManager.Entry entry,boolean export) {
+        stopHistoryPlayback();final int generation=mAudioGeneration;
+        mProfileExecutor.execute(()->{
+            try {java.io.File audio=RecordingAudio.prepare(this,entry.localId);
+                mHandler.post(()->{
+                    if(generation!=mAudioGeneration || isFinishing() || isDestroyed())return;
+                    if(export) {
+                        Uri uri=RecordingAudio.uri(this,entry.localId);Intent share=new Intent(Intent.ACTION_SEND);
+                        share.setType(getContentResolver().getType(uri));share.putExtra(Intent.EXTRA_STREAM,uri);
+                        share.setClipData(ClipData.newRawUri("Selected Voice Vault recording",uri));share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        startActivity(Intent.createChooser(share,"Export recording"));
+                    } else {
+                        try {
+                            MediaPlayer player=new MediaPlayer();mHistoryPlayer=player;player.setDataSource(audio.getAbsolutePath());
+                            player.setOnPreparedListener(p->{if(p==mHistoryPlayer)p.start();});player.setOnCompletionListener(p->stopHistoryPlayback());
+                            player.setOnErrorListener((p,what,extra)->{stopHistoryPlayback();Toast.makeText(this,"Audio unavailable",Toast.LENGTH_LONG).show();return true;});
+                            player.prepareAsync();mHandler.postDelayed(()->{if(player==mHistoryPlayer)stopHistoryPlayback();},3*60*60*1000L);
+                        }catch(Exception error){stopHistoryPlayback();Toast.makeText(this,"Audio unavailable",Toast.LENGTH_LONG).show();}
+                    }
+                });
+            }catch(Exception error){mHandler.post(()->{if(generation==mAudioGeneration)Toast.makeText(this,"Audio unavailable or retrieval failed",Toast.LENGTH_LONG).show();});}
+        });
+    }
+    private void stopHistoryPlayback() {
+        mAudioGeneration++;MediaPlayer player=mHistoryPlayer;mHistoryPlayer=null;
+        if(player!=null){try{player.stop();}catch(Exception ignored){}player.release();}
+    }
+    @Override protected void onStop() {stopHistoryPlayback();super.onStop();}
+
     private void checkAndRequestPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             // Notifications stay disabled by user choice; the foreground
@@ -615,6 +673,7 @@ public class MainActivity extends Activity {
             @Override
             public void onReceive(Context context, Intent intent) {
                 syncWithServiceState();
+                if(mDrawerOpen && !VoiceVaultService.isRecording())loadHistoryIntoDrawer();
                 String action = intent != null ? intent.getAction() : null;
                 if (VoiceVaultService.BROADCAST_TRANSCRIPT.equals(action)) {
                     String text = intent.getStringExtra("text");
@@ -806,6 +865,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        stopHistoryPlayback();
         super.onDestroy();
         mProfileExecutor.shutdownNow();
         stopTimerUpdater();

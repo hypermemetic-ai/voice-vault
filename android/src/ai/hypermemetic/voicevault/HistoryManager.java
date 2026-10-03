@@ -36,6 +36,8 @@ public class HistoryManager {
         public long timestamp;
         public long durationMs;
         public String transcript;
+        public String localId = "", serverId = "", status = "transcribed", failure = "";
+        public boolean audioAvailable, localAvailable, cleanupPending;
 
         public Entry(String id, long timestamp, long durationMs, String transcript) {
             this.id = id;
@@ -95,7 +97,7 @@ public class HistoryManager {
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "Failed reading local history cache", e);
+            Log.e(TAG, "History cache unavailable");
         }
         return list;
     }
@@ -116,43 +118,49 @@ public class HistoryManager {
                 fos.write(arr.toString().getBytes("UTF-8"));
             }
         } catch (Exception e) {
-            Log.e(TAG, "Failed writing local history cache", e);
+            Log.e(TAG, "History cache storage failure");
         }
     }
 
-    public static void fetchHistory(Context context, HistoryCallback callback) {
-        new Thread(() -> {
-            // First load local cache for instant UI rendering
-            List<Entry> local = loadLocalCache(context);
-            Map<String, List<Entry>> grouped = groupEntries(local);
-            callback.onLoaded(grouped);
-
-            // Then fetch latest 50 from server to sync
-            List<Entry> remote = fetchRemoteEntries();
-            if (!remote.isEmpty()) {
-                writeLocalCache(context, remote);
-                callback.onLoaded(groupEntries(remote));
-            }
+    private static Entry recordingEntry(RecordingStore store,RecordingIndex.Entry e) {
+        Entry out=new Entry(e.id,e.capturedAt,e.durationMs,e.transcript);out.localId=e.id;out.serverId=e.serverId;
+        out.status=e.state;out.failure=e.failure;out.localAvailable=store.usable(e);
+        out.audioAvailable=out.localAvailable || e.serverAudio;out.cleanupPending=e.deleted && e.cleanupPending;
+        if(out.cleanupPending) {out.status="cleanup_incomplete";out.audioAvailable=false;}return out;
+    }
+    static List<Entry> merge(Context context,List<Entry> legacy,List<Entry> remote) {
+        Map<String,Entry> merged=new LinkedHashMap<>();RecordingStore store=null;
+        try {store=RecordingStore.get(context);store.reconcile(VoiceVaultService.getActiveRecordingId());
+            for(Entry r:remote)store.remote(r.id,r.timestamp,r.durationMs,r.status,r.failure,r.transcript,r.audioAvailable);
+            for(RecordingIndex.Entry e:store.index.all())if(!e.deleted || e.cleanupPending)merged.put(e.id,recordingEntry(store,e));
+        }catch(Exception error){Log.e(TAG,"Recording history storage failure");}
+        for(Entry e:legacy) {
+            if(store!=null && store.suppressed(e.id))continue;
+            boolean known=merged.containsKey(e.id);for(Entry stored:merged.values())if(!stored.serverId.isEmpty() && stored.serverId.equals(e.id))known=true;
+            if(!known)merged.put(e.id,e);
+        }
+        if(store==null)for(Entry e:remote)merged.putIfAbsent(e.id,e);
+        List<Entry> sorted=new ArrayList<>(merged.values());sorted.sort((a,b)->Long.compare(b.timestamp,a.timestamp));
+        List<Entry> visible=new ArrayList<>();int resolved=0;
+        for(Entry e:sorted) {
+            boolean terminal=e.status.equals("transcribed") || e.status.equals("no_speech") || e.status.equals("speaker_rejected");
+            if(!terminal || resolved++<MAX_TRANSCRIPTS)visible.add(e);
+        }return visible;
+    }
+    public static void fetchHistory(Context context,HistoryCallback callback) {
+        new Thread(()->{
+            List<Entry> legacy=loadLocalCache(context);callback.onLoaded(groupEntries(merge(context,legacy,new ArrayList<>())));
+            List<Entry> remote=fetchRemoteEntries();callback.onLoaded(groupEntries(merge(context,legacy,remote)));
+            // Only resolved transcript cache is bounded; durable unresolved entries live independently.
+            List<Entry> texts=new ArrayList<>();for(Entry e:merge(context,legacy,remote))if(!e.transcript.isEmpty() && !e.cleanupPending && texts.size()<MAX_TRANSCRIPTS)texts.add(e);
+            writeLocalCache(context,texts);
         }).start();
     }
-
-    /**
-     * Resolve the single most recent transcript for the dashboard preview: the
-     * local cache first (instant, no network), then one server sync when nothing
-     * is cached yet (fresh install or cleared app data). Runs off the main thread
-     * and invokes the callback exactly once with null when there is no history.
-     */
-    public static void fetchLatestTranscript(Context context, LatestTranscriptCallback callback) {
-        new Thread(() -> {
-            Entry latest = latestEntry(loadLocalCache(context));
-            if (latest == null) {
-                List<Entry> remote = fetchRemoteEntries();
-                if (!remote.isEmpty()) {
-                    writeLocalCache(context, remote);
-                }
-                latest = latestEntry(remote);
-            }
-            if (callback != null) callback.onLoaded(latest);
+    public static void fetchLatestTranscript(Context context,LatestTranscriptCallback callback) {
+        new Thread(()->{
+            List<Entry> legacy=loadLocalCache(context);Entry latest=latestEntry(merge(context,legacy,new ArrayList<>()));
+            if(latest==null)latest=latestEntry(merge(context,legacy,fetchRemoteEntries()));
+            if(callback!=null)callback.onLoaded(latest);
         }).start();
     }
 
@@ -195,7 +203,7 @@ public class HistoryManager {
                     for (int i = 0; i < recs.length(); i++) {
                         JSONObject item = recs.getJSONObject(i);
                         String text = item.optString("transcript", "").trim();
-                        if (text.isEmpty()) continue; // Transcripts only
+                        // Blank text is a valid unresolved or terminal no-speech item.
 
                         String createdAt = item.optString("created_at", "");
                         long ts = System.currentTimeMillis();
@@ -206,18 +214,15 @@ public class HistoryManager {
                             }
                         } catch (Exception ignored) {}
 
-                        remoteEntries.add(new Entry(
-                                item.optString("id", ""),
-                                ts,
-                                item.optLong("duration_ms", 0),
-                                text
-                        ));
-                        if (remoteEntries.size() >= MAX_TRANSCRIPTS) break;
+                        Entry entry=new Entry(item.optString("id",""),ts,item.optLong("duration_ms",0),text);
+                        entry.serverId=entry.id;entry.status=item.optString("status","transcribed");
+                        entry.failure=item.optString("error_category","");entry.audioAvailable=item.optBoolean("audio_available",!entry.id.isEmpty());
+                        remoteEntries.add(entry);
                     }
                 }
             }
         } catch (Exception e) {
-            Log.d(TAG, "Network history fetch skipped: " + e.getMessage());
+            Log.d(TAG, "History server unavailable");
         }
         return remoteEntries;
     }
@@ -261,18 +266,38 @@ public class HistoryManager {
     }
 
     public static void pruneLocalRecordings(Context context) {
+        try { RecordingStore.get(context).prune(); }
+        catch(Exception error){Log.e(TAG,"Recording retention storage failure");}
+    }
+    static boolean delete(Context context,Entry selected) {
         try {
-            File dir = context.getExternalFilesDir("recordings");
-            if (dir == null) dir = context.getFilesDir();
-            File[] files = dir.listFiles((d, name) -> name.endsWith(".m4a") || name.endsWith(".mp4"));
-            if (files != null && files.length > MAX_LOCAL_RECORDINGS) {
-                java.util.Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
-                for (int i = MAX_LOCAL_RECORDINGS; i < files.length; i++) {
-                    files[i].delete();
-                }
+            RecordingStore store=RecordingStore.get(context);RecordingIndex.Entry e=store.index.get(selected.id);
+            if(e==null) {
+                e=new RecordingIndex.Entry();e.id=selected.id;e.capturedAt=selected.timestamp;e.durationMs=selected.durationMs;
+                e.transcript=selected.transcript;e.state=selected.status;e.serverId=selected.serverId;store.index.save(e);
             }
-        } catch (Exception e) {
-            Log.e(TAG, "Error pruning local audio recordings", e);
-        }
+            e=store.deleteLocal(e.id);if(e==null)return false;
+            boolean cleaned=true;
+            String remote=e.serverId;
+            // Updated uploads always use the local UUID, even when their response was lost.
+            if(remote.isEmpty() && !e.filename.isEmpty())remote=e.id;
+            if(!remote.isEmpty()) {
+                DictationUpload.Response response=new DictationUpload().request(VoiceVaultApi.BASE_URL+"/api/recording/"+remote,"DELETE",null,0,null,15000,30000);
+                cleaned=response.status==200;
+                if(cleaned) {Object parsed=RecordingIndex.Json.read(response.body);cleaned=parsed instanceof Map && Boolean.TRUE.equals(((Map<?,?>)parsed).get("ok"));}
+            }
+            store.cleanupFinished(e.id,cleaned);return cleaned;
+        }catch(Exception error){Log.e(TAG,"Recording cleanup incomplete");return false;}
+    }
+    static String statusLabel(Entry e) {
+        if(e.cleanupPending)return "Deletion incomplete — retry cleanup";
+        if(!e.audioAvailable && e.transcript.isEmpty())return "Audio unavailable · "+e.status.replace('_',' ');
+        if(e.status.equals("recovered"))return "Recovered audio · previous outcome unknown";
+        if(e.status.equals("failed") || e.status.equals("interrupted"))return "Saved · "+e.status+" · "+RecordingIndex.safeCategory(e.failure).replace('_',' ');
+        if(e.status.equals("speaker_rejected"))return "Other speaker rejected";
+        if(e.status.equals("no_speech"))return "No speech";
+        if(e.status.equals("processing"))return "Processing";
+        if(e.status.equals("recording"))return "Recording";
+        return e.status.equals("transcribed") ? "Transcribed" : "Saved · "+e.status;
     }
 }

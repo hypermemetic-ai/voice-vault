@@ -19,19 +19,26 @@ before(() => {
     return service.slice(a, b);
   };
   const methods = between("    private void startRecording()", "    private void onTranscriptionSuccess(")
-    + between("    private void cancelTimers()", "    private void sendExplicitBroadcast(")
+    + between("    private void rememberServerCopy(", "    private void sendExplicitBroadcast(")
     + between("    @Override\n    public void onDestroy()", "\n}");
   const fixture = fs.readFileSync(path.join(root, "test/fixtures/RecordingServiceHarness.java"), "utf8");
   const harness = path.join(temp, "RecordingServiceHarness.java");
   fs.writeFileSync(harness, fixture.replace("    // PRODUCTION_METHODS", methods));
   const compiled = spawnSync("javac", ["--release", "11", "-d", temp,
-    path.join(sourceDir, "DictationUpload.java"), harness,
+    path.join(sourceDir, "RecordingIndex.java"), path.join(sourceDir, "DictationUpload.java"), harness,
     path.join(root, "test/fixtures/DictationUploadHarness.java")], { encoding: "utf8" });
   assert.equal(compiled.status, 0, compiled.stderr || compiled.error?.message);
 });
 after(() => { if (temp) fs.rmSync(temp, { recursive: true, force: true }); });
 
 for (const [scenario, title] of [
+  ["storage-intent", "capture intent storage failure skips microphone and upload"],
+  ["storage-finalize", "finalization metadata failure retains original and skips upload"],
+  ["recover-repeat", "service recovery owns one attempt and avoids insertion on success/destroy"],
+  ["recover-destroy", "recovery destruction invalidates late output and retains manually retryable audio"],
+  ["recover-cancel", "recovery cancellation preserves original and ignores late result"],
+  ["recover-busy", "recovery cannot interrupt active dictation"],
+  ["recover-failed", "repeat recovery failure retains original and original capture time"],
   ["prepare", "microphone prepare failure releases recording resources"],
   ["start", "delayed microphone start failure returns idle without upload"],
   ["early-stop", "stopping before the chirp delay prevents empty-audio upload"],

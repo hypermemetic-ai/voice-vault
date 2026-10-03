@@ -12,7 +12,7 @@ const db = new DatabaseSync(DB_PATH);
 // Enable WAL mode for high concurrency and resilience
 db.exec(`
   PRAGMA journal_mode = WAL;
-  PRAGMA synchronous = NORMAL;
+  PRAGMA synchronous = FULL;
   CREATE TABLE IF NOT EXISTS recordings (
     id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -56,59 +56,63 @@ db.exec(`
   );
 `);
 
-const stmtInsert = db.prepare(`
-  INSERT INTO recordings (
-    id, created_at, duration_ms, client_device,
-    raw_filename, wav_filename, transcript, status, transcribe_ms
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
+// Additive migration preserves older recordings and voice-profile tables.
+const columns = new Set(db.prepare("PRAGMA table_info(recordings)").all().map(row => row.name));
+for (const [name, definition] of Object.entries({
+  error_category: "TEXT DEFAULT ''", updated_at: "TEXT DEFAULT ''",
+  attempt_generation: "INTEGER DEFAULT 0", fingerprint: "TEXT DEFAULT ''",
+  audio_available: "INTEGER DEFAULT 1", outcome_json: "TEXT DEFAULT ''",
+})) {
+  if (!columns.has(name)) db.exec(`ALTER TABLE recordings ADD COLUMN ${name} ${definition}`);
+}
 
-const stmtGet = db.prepare(`
-  SELECT * FROM recordings WHERE id = ?
-`);
-
-const stmtList = db.prepare(`
-  SELECT * FROM recordings ORDER BY created_at DESC LIMIT ? OFFSET ?
-`);
-
-const stmtDelete = db.prepare(`
-  DELETE FROM recordings WHERE id = ?
-`);
-
-const stmtUpdateTranscript = db.prepare(`
-  UPDATE recordings SET transcript = ?, status = ?, transcribe_ms = ? WHERE id = ?
-`);
-
+const stmtGet = db.prepare("SELECT * FROM recordings WHERE id = ?");
 export function saveRecording(rec) {
-  stmtInsert.run(
-    rec.id,
-    rec.createdAt || new Date().toISOString(),
-    rec.durationMs || 0,
-    rec.clientDevice || "",
-    rec.rawFilename,
-    rec.wavFilename,
-    rec.transcript || "",
-    rec.status || "transcribed",
-    rec.transcribeMs || 0
-  );
-  return stmtGet.get(rec.id);
+  db.prepare(`INSERT INTO recordings (id, created_at, duration_ms, client_device,
+    raw_filename, wav_filename, transcript, status, transcribe_ms, error_category,
+    updated_at, fingerprint, audio_available, outcome_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      rec.id, rec.createdAt || new Date().toISOString(), rec.durationMs || 0,
+      rec.clientDevice || "", rec.rawFilename, rec.wavFilename || rec.rawFilename,
+      rec.transcript || "", rec.status || "transcribed", rec.transcribeMs || 0,
+      rec.errorCategory || "", new Date().toISOString(), rec.fingerprint || "",
+      rec.audioAvailable === false ? 0 : 1, rec.outcome ? JSON.stringify(rec.outcome) : "");
+  return getRecording(rec.id);
 }
-
-export function getRecording(id) {
-  return stmtGet.get(id);
-}
-
+export function getRecording(id) { return stmtGet.get(id); }
 export function listRecordings(limit = 50, offset = 0) {
-  return stmtList.all(limit, offset);
+  return db.prepare("SELECT * FROM recordings ORDER BY created_at DESC LIMIT ? OFFSET ?")
+    .all(Math.min(500, Math.max(1, limit || 50)), Math.max(0, offset));
 }
-
-export function deleteRecording(id) {
-  return stmtDelete.run(id);
-}
-
+export function deleteRecording(id) { return db.prepare("DELETE FROM recordings WHERE id = ?").run(id); }
 export function updateTranscript(id, text, status = "transcribed", transcribeMs = 0) {
-  stmtUpdateTranscript.run(text, status, transcribeMs, id);
-  return stmtGet.get(id);
+  db.prepare("UPDATE recordings SET transcript=?, status=?, transcribe_ms=? WHERE id=?")
+    .run(text, status, transcribeMs, id);
+  return getRecording(id);
+}
+export function updateRecording(id, status, errorCategory = "", audioAvailable = true) {
+  db.prepare(`UPDATE recordings SET status=?, error_category=?, audio_available=?, updated_at=? WHERE id=?`)
+    .run(status, errorCategory, audioAvailable ? 1 : 0, new Date().toISOString(), id);
+  return getRecording(id);
+}
+export function claimRecording(id) {
+  const result = db.prepare(`UPDATE recordings SET status='processing', error_category='',
+    attempt_generation=attempt_generation+1, updated_at=?
+    WHERE id=? AND audio_available=1 AND status IN ('pending','failed','interrupted')`)
+    .run(new Date().toISOString(), id);
+  return result.changes ? getRecording(id) : null;
+}
+export function finishRecording(id, generation, status, outcome, errorCategory = "") {
+  const result = db.prepare(`UPDATE recordings SET status=?, error_category=?, transcript=?,
+    transcribe_ms=?, outcome_json=?, updated_at=?
+    WHERE id=? AND status='processing' AND attempt_generation=?`).run(
+      status, errorCategory, outcome?.text || "", outcome?.transcribeMs || 0,
+      outcome ? JSON.stringify(outcome) : "", new Date().toISOString(), id, generation);
+  return result.changes ? getRecording(id) : null;
+}
+export function reconcileRecordings() {
+  return db.prepare(`UPDATE recordings SET status='interrupted', error_category='interrupted',
+    updated_at=? WHERE status IN ('intake','pending','processing')`).run(new Date().toISOString());
 }
 
 // ---------------------------------------------------------------------------

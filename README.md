@@ -11,6 +11,9 @@ Ultra-reliable, local-first asynchronous voice recorder and dictation tool for A
 - **Voice Enrollment & Self-Calibration**: Record three ~5 s reference clips; the server extracts normalized 192-d/512-d CAM++ embeddings, self-calibrates an acceptance threshold (`μ − 3σ` of intra-speaker similarity) and stores the gallery in SQLite. No reference audio is ever persisted.
 - **Length-Adaptive Scoring**: Short utterances (`"yes"`, `"okay"`) are scored with a relaxed threshold so brief words are not falsely rejected, while a different voice still fails by a wide margin.
 - **Dynamic Floating Status Overlay**: Compact, semi-transparent top status rectangle displaying live recording duration, transcription state (`Processing`), and completion status (`Copied`), positioned clear of the front camera punch-hole.
+- **Recording recovery**: Failed/interrupted dictations remain in History with their original capture time. Play or export local audio offline, or explicitly retry transcription. Surviving unlisted `dictation_*.m4a`/`.mp4` files are adopted as recovered audio with previous outcome unknown; enrollment/unrelated files are excluded. Unresolved audio is protected from normal retention. Missing/invalid audio stays visible with unavailable actions.
+- **Manual retry ownership**: Recovery belongs to the service, survives Activity recreation, and cannot start while dictation or another retry owns the workflow. Canceling transcription retains finalized audio. Recovery saves text in the same History item and never copies, inserts or auto-sends it; use explicit Copy.
+- **Original audio export and deletion**: Export grants read access only to the selected recording URI, initiated by the user. Confirmed deletion suppresses stale History rediscovery and removes selected owned copies. If server cleanup fails, History shows Retry deletion. A known server copy can be retrieved when the local original is unavailable. The current transcript limit applies to resolved items; failure cards remain discoverable.
 - **Slide-Out History Drawer**: Access the last 50 transcriptions and cached recordings grouped by date, with 1-tap copy to clipboard and duration metrics.
 - **Zero-Latency Acoustic Feedback**: Directly synthesized 16-bit 44.1kHz mono PCM audio (<3ms latency) with warm liquid start pops and glass bell harmonic completion chimes.
 - **Physical Side-Button Controls**: In Dictation Mode, Volume Up starts/stops recording and Volume Down finishes dictation, inserts the text and sends it when Auto-send is on. Double Volume Up toggles Dictation Mode. Double Volume Down toggles Auto-send with ON/OFF feedback; the dashboard checkbox shows the same setting.
@@ -159,7 +162,24 @@ per-tier `backendAttempts` history, and a hung `handy` process is killed at
 | `GET` | `/api/profile/status` | Enrollment state, model, `μ`, `σ`, threshold, gate configuration |
 | `POST` | `/api/profile/verify` | Score one clip against the gallery (`accepted`, `score`, `z`) |
 | `DELETE` | `/api/profile` | Remove the enrolled voiceprint (`POST /api/profile/reset` also works) |
-| `POST` | `/api/transcribe` | Transcribe audio; response includes a `gate` report |
+| `POST` | `/api/transcribe` | Save/index original before transcription; optional `X-Recording-Id` stable identity; existing success fields and `gate` report |
+| `GET` | `/api/history?limit=50` | Capture-ordered recordings, including failed/interrupted items and audio availability |
+| `GET` | `/api/recording/:id` | Safe recording state and saved terminal `outcome`; no inference |
+| `POST` | `/api/recording/:id/transcribe` | Explicit retry of saved failure/interruption; completed outcome replay |
+| `GET` | `/api/audio/:id` | Stream the selected original audio |
+| `DELETE` | `/api/recording/:id` | Delete selected owned original and row; busy or incomplete cleanup is reported |
+
+Uploads without an identity keep their existing raw/multipart success contract and receive
+a generated ID. Updated clients send their recording UUID as `X-Recording-Id` (ASCII
+letters, digits, `_` and `-`, at most 100 characters). The same ID and bytes replay
+an existing outcome without inference; different bytes return HTTP 409
+`identity_conflict`. Processing returns HTTP 409 `busy`; retry is an explicit action.
+Lookup returns `{ok:true, recording:{id,status,error_category,audio_available,outcome,...}}`.
+A processing error returns `{ok:false,id,status:"failed",errorCategory,saved,audioAvailable}`;
+`storage_full` includes temporary-processing ENOSPC. Intake/metadata failure never
+claims `saved:true`. Restart marks ownerless intake/processing as interrupted and
+never retries automatically. Missing audio is reported separately from the outcome.
+Failure responses contain fixed categories, never private paths or raw backend bodies.
 
 ```bash
 # Enroll three 5-second clips
