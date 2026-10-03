@@ -12,7 +12,15 @@ Source validation on 2026-10-03:
 
 After parent source review, `bash android/build-apk.sh` compiled resources/all actual Android sources, dexed, aligned and signed the APK in the isolated implementation checkout. `apksigner verify --print-certs` passed with the unchanged expected SHA-256 certificate `24:AF:79:AF:96:7D:37:80:6A:AC:2B:8D:82:2B:43:81:56:37:64:F0:76:D9:B3:7C:1E:EF:F6:F1:D8:14:1D:F0`. `aapt2 dump badging` reports versionCode **25**, versionName **1.3.0**. Keystore bytes/hash match tracked HEAD exactly. The scoped implementation PR includes the signed `public/voice-vault.apk`.
 
-Delivery/activation are not yet complete. The checkout and generated APK are isolated from the live server. The parent owns PR review/merge, backend-first activation and served-byte verification; tasks 5.2 and 5.3 stay unchecked until those actions complete.
+Delivery and ordinary activation completed on 2026-10-03:
+
+- [Implementation PR #26](https://github.com/hypermemetic-ai/voice-vault/pull/26) merged at `2026-10-03T06:51:32Z` as squash commit `85bf1cd38f8df7d029acbd280a5ae52a7be8dc88`. Scoped source, synthetic tests, documentation and the signed APK were committed/pushed together. Fresh Git status confirmed primary `main` matched `origin/main`; pre-existing untracked baseline material and linked worktrees were preserved.
+- Before activation, the parent verified no live app TCP requests or app-owned child work, and Whisper ready with queue zero and no inference in flight. Only user `voice-vault.service` was briefly stopped; the primary checkout fast-forwarded to the reviewed release, then the new backend restarted. This ensured the new APK was first served with additive backend support active. The service reported active/running.
+- A private cold database/previous-APK rollback checkpoint was retained on the 13 TB drive at `/srv/media-box/voice-vault-deploy-checkpoints/20261003T065305Z`, with retention review after seven days. No recordings or app data were cleared; no other services were changed.
+- A random nonexistent recording lookup returned HTTP **404**, `ok:false` and `errorCategory:not_found` through both `http://127.0.0.1:3005` and `https://qq-box.tail580136.ts.net:3443`, verifying the additive route is active without private recording inputs or inference.
+- APK downloads through both endpoints returned HTTP **200**, exactly **235,518 bytes**, SHA-256 `e18da4c6e4799a5d3c98e2cf553921020c7f162bc013fa2fe950c82f31229723`. These bytes match the verified signed **1.3.0 / versionCode 25** release above.
+
+Tasks 5.2 and 5.3 are complete. Device installation/playback/export/retry acceptance remains explicitly operator-owned, as below.
 
 Operator-owned acceptance after installing the signed update: open History and check any surviving recovered/failed recordings, play/export selected audio, retry against the local server, confirm same-item completion and explicit Copy, test cancellation/restart, and confirm unrelated recordings remain. No phone, microphone, private audio or real inference was operated here. Recovery of the two reported recordings remains conditional on their original bytes surviving; there is no bulk server-orphan import because those files may include deliberate legacy deletions.
 
