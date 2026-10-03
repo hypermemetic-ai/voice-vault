@@ -4,7 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { saveRecording, listRecordings, getRecording, deleteRecording } from "./db.mjs";
+import * as recordingDb from "./db.mjs";
 import { transcribeAudioFile, convertToWav } from "./transcriber.mjs";
 import { decodeWav, encodePcm16Wav } from "./wav.mjs";
 import {
@@ -112,7 +112,7 @@ async function readBody(req, limit = MAX_UPLOAD) {
 function extensionFor(part) {
   if (part.filename) {
     const ext = path.extname(part.filename).toLowerCase();
-    if (ext) return ext;
+    if ([".webm", ".m4a", ".mp4", ".wav", ".aac", ".ogg", ".mp3"].includes(ext)) return ext;
   }
   if (part.contentType.includes("mp4") || part.contentType.includes("m4a")) return ".m4a";
   if (part.contentType.includes("wav")) return ".wav";
@@ -215,6 +215,80 @@ export function createAppServer(options = {}) {
   const publicDir = options.publicDir || PUBLIC_DIR;
   fs.mkdirSync(rawDir, { recursive: true });
   const runTranscription = options.transcribeAudioFile || transcribeAudioFile;
+  const store = options.recordingStore || recordingDb;
+  const files = options.recordingFiles || fs;
+  // One production server owns this store; a restart never starts inference.
+  store.reconcileRecordings();
+  const liveAttempts = new Set();
+  const terminal = new Set(["transcribed", "no_speech", "speaker_rejected"]);
+  const validId = id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(id);
+  const ownedPath = rec => {
+    if (!rec || !validId(rec.id) || !rec.raw_filename ||
+        path.basename(rec.raw_filename) !== rec.raw_filename ||
+        !rec.raw_filename.startsWith(`${rec.id}.`)) return null;
+    const file = path.join(rawDir, rec.raw_filename);
+    try { const stat = files.lstatSync(file); return stat.isFile() && !stat.isSymbolicLink() ? file : null; }
+    catch { return null; }
+  };
+  const available = rec => { const file = ownedPath(rec); return Boolean(file && files.statSync(file).size > 0); };
+  const category = error => {
+    const code = String(error?.code || "");
+    const message = String(error?.message || "");
+    if (/ENOSPC|SQLITE_FULL/.test(code) || /database or disk is full|no space left/i.test(message)) return "storage_full";
+    if (/SQLITE|EIO|EROFS|EACCES/.test(code)) return "storage_failure";
+    if (/TIMEOUT|ETIMEDOUT/.test(code) || /timed? ?out/i.test(message)) return "timeout";
+    if (/ffmpeg|convert|invalid audio/i.test(message)) return "invalid_audio";
+    if (/backend|whisper|handy/i.test(message)) return "backend_failed";
+    return "processing_failed";
+  };
+  const view = rec => ({ id: rec.id, created_at: rec.created_at, duration_ms: rec.duration_ms,
+    transcript: rec.transcript, status: rec.status, error_category: rec.error_category,
+    attempt_generation: rec.attempt_generation, audio_available: available(rec),
+    audioUrl: `/api/audio/${rec.id}`, outcome: rec.outcome_json ? JSON.parse(rec.outcome_json) : null });
+  const reconcileIdle = rec => {
+    if (rec && ["processing", "intake", "pending"].includes(rec.status) && !liveAttempts.has(rec.id)) {
+      return store.updateRecording(rec.id, "interrupted", "interrupted", available(rec));
+    }
+    return rec;
+  };
+  const respondExisting = (res, rec) => {
+    if (terminal.has(rec.status)) {
+      const outcome = rec.outcome_json ? JSON.parse(rec.outcome_json) : {
+        ok: true, id: rec.id, text: rec.transcript, hasSpeech: rec.status === "transcribed",
+        rejected: rec.status === "speaker_rejected", durationMs: rec.duration_ms,
+        transcribeMs: rec.transcribe_ms, audioUrl: `/api/audio/${rec.id}` };
+      sendJson(res, 200, outcome);
+    } else sendJson(res, rec.status === "processing" || rec.status === "intake" ? 409 : 422,
+      { ok: false, id: rec.id, status: rec.status, errorCategory: rec.error_category || "busy",
+        audioAvailable: available(rec), saved: available(rec) });
+  };
+  const processRecording = async (res, rec) => {
+    let claimed;
+    try { claimed = store.claimRecording(rec.id); }
+    catch (error) {
+      sendJson(res, 500, { ok: false, id: rec.id, errorCategory: category(error), saved: false, audioAvailable: available(rec) }); return;
+    }
+    if (!claimed) { respondExisting(res, store.getRecording(rec.id)); return; }
+    liveAttempts.add(claimed.id);
+    try {
+      const result = await runTranscription(ownedPath(claimed), claimed.id, options.transcribeOptions);
+      const status = result.rejected ? "speaker_rejected" : result.hasSpeech ? "transcribed" : "no_speech";
+      const outcome = { ok: true, id: claimed.id, text: result.text, hasSpeech: result.hasSpeech,
+        rejected: Boolean(result.rejected), durationMs: claimed.duration_ms,
+        audioSentMs: result.audioSentMs, transcribeMs: result.transcribeMs,
+        audioUrl: `/api/audio/${claimed.id}`, backend: result.backend, backendAttempts: result.backendAttempts,
+        rescue: result.rescue ?? null, gate: result.gate };
+      if (!store.finishRecording(claimed.id, claimed.attempt_generation, status, outcome)) throw new Error("Metadata commit failed");
+      sendJson(res, 200, outcome);
+    } catch (error) {
+      const errorCategory = category(error);
+      let metadataSaved = false;
+      try { metadataSaved = Boolean(store.finishRecording(claimed.id, claimed.attempt_generation, "failed", null, errorCategory)); } catch {}
+      console.error(`Recording processing failed: ${errorCategory}`);
+      sendJson(res, 500, { ok: false, id: claimed.id, status: "failed", errorCategory,
+        saved: metadataSaved && available(claimed), audioAvailable: available(claimed) });
+    } finally { liveAttempts.delete(claimed.id); }
+  };
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
@@ -223,7 +297,7 @@ export function createAppServer(options = {}) {
     // CORS headers for local LAN/Tailscale access
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Content-Length, X-Duration-Ms, X-Device");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Content-Length, X-Duration-Ms, X-Device, X-Recording-Id");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -416,57 +490,91 @@ export function createAppServer(options = {}) {
           return;
         }
 
-        // Generate unique recording ID
-        const dateStr = new Date().toISOString().replace(/[:.]/g, "-");
-        const id = `${dateStr}_${crypto.randomBytes(4).toString("hex")}`;
-        const rawFilename = `${id}${extension}`;
-        const rawFilePath = path.join(rawDir, rawFilename);
-
-        // Save raw audio to permanent storage
-        fs.writeFileSync(rawFilePath, audioData);
-
-        // Transcribe via Whisper (with target-speaker gating when enrolled)
-        const transcribeResult = await runTranscription(rawFilePath, id, options.transcribeOptions);
-
-        // Save to SQLite database
-        const status = transcribeResult.rejected
-          ? "speaker_rejected"
-          : transcribeResult.hasSpeech
-            ? "transcribed"
-            : "no_speech";
-        saveRecording({
-          id,
-          createdAt: new Date().toISOString(),
-          durationMs,
-          clientDevice,
-          rawFilename,
-          wavFilename: rawFilename, // Can be converted on demand
-          transcript: transcribeResult.text,
-          status,
-          transcribeMs: transcribeResult.transcribeMs
-        });
-
-        sendJson(res, 200, {
-          ok: true,
-          id,
-          text: transcribeResult.text,
-          hasSpeech: transcribeResult.hasSpeech,
-          rejected: Boolean(transcribeResult.rejected),
-          durationMs,
-          audioSentMs: transcribeResult.audioSentMs,
-          transcribeMs: transcribeResult.transcribeMs,
-          audioUrl: `/api/audio/${id}`,
-          backend: transcribeResult.backend,
-          backendAttempts: transcribeResult.backendAttempts,
-          rescue: transcribeResult.rescue ?? null,
-          gate: transcribeResult.gate,
-        });
-        if (transcribeResult.rescue) {
-          console.log(
-            `[${new Date().toISOString()}] LF rescue (highpass ${transcribeResult.rescue.hz}Hz) recovered speech for ${id}`,
-          );
+        const suppliedId = req.headers["x-recording-id"];
+        if (suppliedId != null && !validId(suppliedId)) {
+          sendJson(res, 400, { ok: false, errorCategory: "invalid_identity" }); return;
         }
+        const id = suppliedId || crypto.randomUUID();
+        const fingerprint = crypto.createHash("sha256").update(audioData).digest("hex");
+        const existing = reconcileIdle(store.getRecording(id));
+        if (existing) {
+          const previousFingerprint = existing.fingerprint || (available(existing)
+            ? crypto.createHash("sha256").update(files.readFileSync(ownedPath(existing))).digest("hex") : null);
+          if (!previousFingerprint || previousFingerprint !== fingerprint) {
+            sendJson(res, 409, { ok: false, id, errorCategory: "identity_conflict" }); return;
+          }
+          if (available(existing) || terminal.has(existing.status) || liveAttempts.has(id)) {
+            respondExisting(res, existing); return;
+          }
+          // No accepted server copy: the same local bytes may repair intake using the same row.
+        }
+        const rawFilename = existing ? existing.raw_filename : `${id}${extension}`;
+        if (!rawFilename || path.basename(rawFilename) !== rawFilename || !rawFilename.startsWith(`${id}.`)) {
+          sendJson(res, 409, { ok: false, id, errorCategory: "identity_conflict" }); return;
+        }
+        let rec;
+        try {
+          rec = existing ? store.updateRecording(id, "intake", "", false) : store.saveRecording({ id, durationMs: Math.max(0, durationMs || 0), clientDevice,
+            rawFilename, status: "intake", fingerprint, audioAvailable: false });
+          const file = path.join(rawDir, rawFilename);
+          const temporary = `${file}.part`;
+          let fd, createdTemporary = false;
+          try {
+            // A crash may leave only this identity's incomplete intake staging file.
+            if (existing && files.existsSync(temporary)) {
+              const stale = files.lstatSync(temporary);
+              if (!stale.isFile() || stale.isSymbolicLink()) throw Object.assign(new Error("Unsafe intake staging"), { code: "EACCES" });
+              files.unlinkSync(temporary);
+            }
+            fd = files.openSync(temporary, "wx", 0o600); createdTemporary = true;
+            files.writeFileSync(fd, audioData);
+            files.fsyncSync(fd);
+            files.closeSync(fd); fd = null;
+            files.renameSync(temporary, file);
+            const directory = files.openSync(rawDir, "r");
+            try { files.fsyncSync(directory); } finally { files.closeSync(directory); }
+          } finally {
+            if (fd != null) files.closeSync(fd);
+            if (createdTemporary) { try { files.unlinkSync(temporary); } catch {} }
+          }
+          rec = store.updateRecording(id, "pending", "", true);
+        } catch (error) {
+          const errorCategory = category(error);
+          let metadataSaved = false;
+          try { if (rec) metadataSaved = Boolean(store.updateRecording(id, "failed", errorCategory, available(rec))); } catch {}
+          sendJson(res, 500, { ok: false, id, status: "failed", errorCategory,
+            saved: false, audioAvailable: Boolean(rec && available(rec)), metadataSaved }); return;
+        }
+        await processRecording(res, rec);
         return;
+      }
+
+      const recordingMatch = pathname.match(/^\/api\/recording\/([^/]+)(\/transcribe)?$/);
+      if (recordingMatch && ["GET", "POST", "DELETE"].includes(req.method)) {
+        const id = recordingMatch[1];
+        if (!validId(id)) { sendJson(res, 400, { ok: false, errorCategory: "invalid_identity" }); return; }
+        const rec = reconcileIdle(store.getRecording(id));
+        if (!rec) { sendJson(res, req.method === "DELETE" ? 200 : 404, { ok: req.method === "DELETE", errorCategory: "not_found" }); return; }
+        if (req.method === "GET" && !recordingMatch[2]) { sendJson(res, 200, { ok: true, recording: view(rec) }); return; }
+        if (req.method === "POST" && recordingMatch[2]) {
+          if (terminal.has(rec.status) || rec.status === "processing" || rec.status === "intake") { respondExisting(res, rec); return; }
+          if (!available(rec)) { sendJson(res, 409, { ok: false, id, errorCategory: "audio_unavailable" }); return; }
+          store.updateRecording(id, rec.status, rec.error_category, true);
+          await processRecording(res, rec); return;
+        }
+        if (req.method === "DELETE" && !recordingMatch[2]) {
+          if (rec.status === "processing" || rec.status === "intake") { sendJson(res, 409, { ok: false, id, errorCategory: "busy" }); return; }
+          try {
+            const file = ownedPath(rec);
+            if (file) files.unlinkSync(file);
+            else if (rec.raw_filename && files.existsSync(path.join(rawDir, path.basename(rec.raw_filename)))) {
+              sendJson(res, 409, { ok: false, id, errorCategory: "cleanup_incomplete" }); return;
+            }
+            store.deleteRecording(id);
+            sendJson(res, 200, { ok: true, id });
+          } catch { sendJson(res, 500, { ok: false, id, errorCategory: "cleanup_incomplete" }); }
+          return;
+        }
       }
 
       // -------------------------------------------------------------
@@ -474,7 +582,7 @@ export function createAppServer(options = {}) {
       // -------------------------------------------------------------
       if (req.method === "GET" && pathname === "/api/history") {
         const limit = parseInt(url.searchParams.get("limit") || "50", 10);
-        const records = listRecordings(limit);
+        const records = store.listRecordings(limit).map(reconcileIdle).map(view);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, recordings: records }));
         return;
@@ -485,14 +593,14 @@ export function createAppServer(options = {}) {
       // -------------------------------------------------------------
       if ((req.method === "GET" || req.method === "HEAD") && pathname.startsWith("/api/audio/")) {
         const id = pathname.replace("/api/audio/", "").trim();
-        const rec = getRecording(id);
+        const rec = validId(id) ? store.getRecording(id) : null;
         if (!rec) {
           sendJson(res, 404, { ok: false, error: "Recording not found" });
           return;
         }
 
-        const filePath = path.join(rawDir, rec.raw_filename);
-        if (!fs.existsSync(filePath)) {
+        const filePath = ownedPath(rec);
+        if (!filePath || !available(rec)) {
           sendJson(res, 404, { ok: false, error: "Audio file missing on disk" });
           return;
         }
@@ -506,6 +614,9 @@ export function createAppServer(options = {}) {
           const parts = range.replace(/bytes=/, "").split("-");
           const start = parseInt(parts[0], 10);
           const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+          if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end >= stat.size) {
+            res.writeHead(416, { "Content-Range": `bytes */${stat.size}` }); res.end(); return;
+          }
           const chunksize = (end - start) + 1;
           const fileStream = fs.createReadStream(filePath, { start, end });
           res.writeHead(206, {
@@ -523,16 +634,6 @@ export function createAppServer(options = {}) {
           });
           fs.createReadStream(filePath).pipe(res);
         }
-        return;
-      }
-
-      // -------------------------------------------------------------
-      // API: Delete Recording
-      // -------------------------------------------------------------
-      if (req.method === "DELETE" && pathname.startsWith("/api/recording/")) {
-        const id = pathname.replace("/api/recording/", "").trim();
-        deleteRecording(id);
-        sendJson(res, 200, { ok: true });
         return;
       }
 
@@ -568,8 +669,8 @@ export function createAppServer(options = {}) {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("Not Found");
     } catch (err) {
-      console.error("Server error:", err);
-      sendJson(res, err.statusCode || 500, { ok: false, error: err.message });
+      console.error("Server request failed:", category(err));
+      sendJson(res, err.statusCode || 500, { ok: false, errorCategory: category(err), error: pathname.startsWith("/api/profile/") && err.statusCode === 400 && /shorter than/.test(err.message) ? "Enrollment clips are shorter than the required minimum" : "Request failed" });
     }
   });
 }
