@@ -139,5 +139,34 @@ public class PaseoHarness {
         f.editor.text = PaseoSelection.draftText(true, false, hint);
         check(g.check(f.root, f.editor, hint, true, false) == PaseoSelection.Status.SEND); check(g.dispatch());
     }
-    public static void main(String[] args) { selection(); flattenedNativeTree(); flow(); }
+    static void composerText() {
+        // Dictation adds to the draft; it never replaces it.
+        check(PaseoSelection.append("", "hello there").equals("hello there"));
+        check(PaseoSelection.append("  \n", " hello ").equals("hello"));
+        check(PaseoSelection.append("fix the bug", "and add a test").equals("fix the bug and add a test"));
+        check(PaseoSelection.append("line one\nline two \n", "more").equals("line one\nline two more"));
+        check(PaseoSelection.append("draft\u00A0", "x").equals("draft x"));
+        // Web editors echo with different whitespace (NBSP, paragraph newlines, trailing break).
+        check(PaseoSelection.sameDraft("a b\nc", "a\u00A0b c\n"));
+        check(!PaseoSelection.sameDraft("a b", "a bc"));
+        check(PaseoSelection.blank("\n") && PaseoSelection.blank("\u200B") && !PaseoSelection.blank("x"));
+        // A placeholder reported as text (no hint flag) is not a draft.
+        check(PaseoSelection.draftText(true, false, "Ask anything", "Ask anything").isEmpty());
+        check(PaseoSelection.draftText(true, false, "real draft", "Ask anything").equals("real draft"));
+        check(PaseoSelection.draftText(false, false, "Ask anything", "Ask anything").equals("Ask anything"));
+        // T3 Code's composer submit names by mode; never its other buttons.
+        for (String label : new String[] {"Submit message", "Steer message", "Queue message", "Compact and send", "Update queued message"})
+            check(PaseoSelection.primary(label));
+        for (String label : new String[] {"Stop generation", "Submitting message", "Connecting", "Preparing worktree",
+                "Resume thread", "Open sending thread", "Edit queued message", "Remove queued message"})
+            check(!PaseoSelection.primary(label));
+        // The gate echoes on normalized text and still cancels on real edits.
+        PaseoSelection.Gate g = written("draft");
+        Fixture f = new Fixture(420, 20, 1);
+        f.editor.text = "draft  more\n";
+        check(g.check(f.root, f.editor, "draft more", true, false) == PaseoSelection.Status.SEND);
+        g = written("draft"); f.editor.text = "draft more"; g.observe(f.editor, "draft more");
+        f.editor.text = "draft more!"; check(g.check(f.root, f.editor, "draft more", true, false) == PaseoSelection.Status.ABORT);
+    }
+    public static void main(String[] args) { selection(); flattenedNativeTree(); flow(); composerText(); }
 }

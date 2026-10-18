@@ -73,23 +73,20 @@ test("Quick Settings tile toggles dictation mode", () => {
   );
 });
 
-test("volume keys honor dictation mode (up: record toggle, down: paste)", () => {
+test("volume keys honor dictation mode (up: record toggle, down: insert)", () => {
   const source = read(KEY_SERVICE);
-  assert.ok(
-    !source.includes("DOUBLE_PRESS_WINDOW_MS") && !source.includes("mLastVolumeDownTime"),
-    "old 450ms double-tap listener must be removed",
-  );
   for (const token of [
     "pref_dictation_mode_enabled",
     "KEYCODE_VOLUME_UP",
     "KEYCODE_VOLUME_DOWN",
-    "ACTION_PASTE",
-    "ACTION_IME_ENTER",
+    "ACTION_SET_TEXT",
     "pref_auto_send_on_paste",
     "autoDismissClipboardOverlay",
   ]) {
     assert.ok(source.includes(token), `VoiceVaultKeyService.java must reference ${token}`);
   }
+  // The blind generic Enter/any-"send"-button path is gone; every app uses the composer flow.
+  assert.doesNotMatch(source, /ACTION_IME_ENTER|findAndClickSendButton|FOLLOWUP_SEND_DELAY_MS/);
 });
 
 test("auto-send on paste preference defaults to true in UI and service", () => {
@@ -116,86 +113,23 @@ test("manifest wires tile long-press and bumps version", () => {
     manifest.includes("android.service.quicksettings.action.QS_TILE_PREFERENCES"),
     "MainActivity must declare QS_TILE_PREFERENCES",
   );
-  assert.ok(
-    manifest.includes('android:versionCode="24"'),
-    "expected versionCode 24",
-  );
-  assert.ok(
-    manifest.includes('android:versionName="1.2.20"'),
-    "expected versionName 1.2.20",
-  );
+  assert.ok(manifest.includes('android:versionCode="26"'), "expected versionCode 26");
+  assert.ok(manifest.includes('android:versionName="1.4.0"'), "expected versionName 1.4.0");
 });
 
-test("VoiceVaultKeyService implements auto-focus, 0ms block insert, and send button auto-send", () => {
+test("VoiceVaultKeyService appends to the focused composer and sends via its own submit control", () => {
   const source = read(KEY_SERVICE);
-
-  // Auto-focus target field via findEditableNode DFS
-  assert.ok(
-    source.includes("findFocus") && source.includes("!target.isEditable() && !isEditClass"),
-    "findFocus result must be verified as editable and discarded if non-editable",
-  );
-  assert.ok(
-    source.includes("findEditableNode("),
-    "VoiceVaultKeyService must define findEditableNode",
-  );
-  assert.ok(
-    source.includes("node.isEditable()") && source.includes('.contains("EditText")'),
-    "findEditableNode must match isEditable and EditText className",
-  );
-  assert.ok(
-    source.includes("target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)"),
-    "pasteIntoFocusedField must auto-focus discovered editable field",
-  );
-
-  // 0ms block text insertion via ACTION_SET_TEXT with ACTION_PASTE fallback
-  assert.ok(
-    source.includes("ACTION_SET_TEXT"),
-    "VoiceVaultKeyService must use ACTION_SET_TEXT",
-  );
-  assert.ok(
-    source.includes("ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE"),
-    "VoiceVaultKeyService must pass ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE",
-  );
-  assert.ok(
-    source.includes("ClipboardManager"),
-    "VoiceVaultKeyService must read clipboard content",
-  );
-  assert.ok(
-    source.includes("ACTION_PASTE"),
-    "VoiceVaultKeyService must retain ACTION_PASTE fallback",
-  );
-
-  // Auto-send: findAndClickSendButton and clickable parent traversal
-  assert.ok(
-    source.includes("findAndClickSendButton("),
-    "VoiceVaultKeyService must define findAndClickSendButton",
-  );
-  for (const keyword of ["send", "submit", "send message", "send sms"]) {
-    assert.ok(
-      source.toLowerCase().includes(keyword),
-      `VoiceVaultKeyService must search for send keyword: ${keyword}`,
-    );
+  const selection = read(path.join(path.dirname(KEY_SERVICE), "PaseoSelection.java"));
+  assert.match(source, /findFocus\(AccessibilityNodeInfo\.FOCUS_INPUT\)/);
+  assert.match(source, /PaseoSelection\.append\(editor\.text, transcript\)/);
+  assert.match(source, /ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, expected/);
+  assert.match(source, /ClipboardManager/);
+  for (const label of ["Submit message", "Queue message", "Steer message", "Send message", "Send"]) {
+    assert.ok(selection.includes(`"${label}".equals(label)`), `submit label ${label}`);
   }
-  assert.ok(
-    source.includes("getContentDescription") && source.includes("getText") && source.includes("getViewIdResourceName"),
-    "findAndClickSendButton must check contentDescription, text, and view ID",
-  );
-  assert.ok(
-    source.includes("getParent()") && source.includes("isClickable()"),
-    "findAndClickSendButton must traverse up to clickable parent wrappers",
-  );
-  assert.ok(
-    source.includes("IME_ENTER_DELAY_MS") && source.includes("ACTION_IME_ENTER"),
-    "auto-send must dispatch ACTION_IME_ENTER with delay",
-  );
-  assert.ok(
-    source.includes("FOLLOWUP_SEND_DELAY_MS") && source.includes("stage2"),
-    "auto-send must retain the Stage 2 follow-up dispatch",
-  );
-  assert.ok(
-    source.includes("recycle()"),
-    "VoiceVaultKeyService must safely recycle traversed accessibility nodes",
-  );
+  assert.match(source, /target\.performAction\(AccessibilityNodeInfo\.ACTION_CLICK\)/);
+  assert.match(source, /recycle\(\)/);
+  assert.doesNotMatch(source, /SoundEffects/);
 });
 
 test("SetupDiagnostics inspects real system states and builds deep links", () => {
@@ -279,19 +213,11 @@ test("manifest declares SetupActivity and battery permission", () => {
   );
 });
 
-test("VoiceVaultKeyService supports double-press Volume Up to toggle Dictation Mode", () => {
+test("VoiceVaultKeyService holds Volume Up to toggle Dictation Mode", () => {
   const source = read(KEY_SERVICE);
   assert.ok(
-    source.includes("VolumeUpTiming.UP_WINDOW_MS + 1"),
-    "VoiceVaultKeyService must wait until just after the inclusive Up deadline",
-  );
-  assert.ok(
-    source.includes("mVolUpTiming.inactivePress(now)"),
-    "VoiceVaultKeyService must track inactive Volume Up presses by uptime",
-  );
-  assert.ok(
     source.includes("setDictationModeEnabled(true)") && source.includes("setDictationModeEnabled(false)"),
-    "VoiceVaultKeyService must toggle dictation mode on double-press Volume Up",
+    "VoiceVaultKeyService must toggle dictation mode on a Volume Up hold",
   );
   assert.ok(
     source.includes("notifyTileStateChanged") && source.includes("requestListeningState"),
@@ -299,18 +225,8 @@ test("VoiceVaultKeyService supports double-press Volume Up to toggle Dictation M
   );
 });
 
-test("Volume Down defers insertion and restores double-toggle", () => {
+test("Volume Down hold toggles auto-send; insertion-only explains itself", () => {
   const source = read(KEY_SERVICE);
-  assert.ok(
-    source.includes("mVolDnTiming"),
-    "VoiceVaultKeyService must distinguish Volume Down singles and doubles",
-  );
-  assert.ok(
-    source.includes("setAutoSendEnabled") && source.includes("mPendingVolDnRunnable"),
-    "Volume Down must support double-Down toggling without inserting",
-  );
-  assert.ok(
-    source.includes("Inserted — auto-send OFF"),
-    "Paseo insertion-only mode must explain why text was not sent",
-  );
+  assert.match(source, /setAutoSendEnabled\(enabled\)/);
+  assert.ok(source.includes("Inserted — auto-send OFF"), "insertion-only mode must explain why text was not sent");
 });

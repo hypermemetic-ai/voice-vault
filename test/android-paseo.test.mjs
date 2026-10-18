@@ -20,9 +20,11 @@ test('Paseo selectors and bounded echo/readiness policy', () => {
     }
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
-test('native path is isolated from generic multi-send and retains clipboard/history', () => {
+test('every app uses the single-dispatch composer path and retains clipboard/history', () => {
   const s = readFileSync(path.join(src, 'VoiceVaultKeyService.java'), 'utf8');
-  assert.match(s, /if \(PaseoSelection\.isPaseo\(pkg\)\) \{\s*pasteIntoPaseo\(appRoot, completedTranscript\);\s*return;/);
+  const paste = s.split('private void pasteIntoFocusedField(String completedTranscript)')[1].split('private void clearPendingComposer()')[0];
+  assert.match(paste, /pasteIntoPaseo\(appRoot, completedTranscript\)/);
+  assert.doesNotMatch(s, /PaseoSelection\.isPaseo/);
   assert.match(s, /readPasteText\(transcript\)/);
   assert.match(s, /mPendingDictation\.complete\(recordingId, text, packageName, windowId\)/);
   assert.match(s, /mFlowDispatched = true/);
@@ -30,16 +32,17 @@ test('native path is isolated from generic multi-send and retains clipboard/hist
   assert.match(s, /Send not confirmed — tap Send/);
   const adapter = s.split('private static final class PaseoTree')[1].split('private void paseoFeedback')[0];
   assert.match(adapter, /n\.label = desc != null \? desc\.toString\(\) : hint != null \? hint\.toString\(\)/);
-  assert.match(adapter, /n\.text = PaseoSelection\.draftText\(n\.editable,\s*Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.O && info\.isShowingHintText\(\), text\)/);
+  assert.match(adapter, /n\.text = PaseoSelection\.draftText\(n\.editable,\s*Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.O && info\.isShowingHintText\(\), text, hint\)/);
   const entry = s.slice(s.indexOf('private void pasteIntoPaseo('), s.indexOf('private boolean validPaseo('));
   const insertion = s.split('private void insertPaseo(')[1].split('private void checkPaseo(')[0];
-  assert.match(entry, /PaseoSelection\.composer\(tree\.root\)/);
+  assert.match(s, /PaseoSelection\.composer\(tree\.root\)/);
+  assert.match(entry, /findComposer\(initialRoot\)/);
   assert.match(insertion, /currentComposer\(root, mFlowComposer\)/);
   assert.doesNotMatch(insertion, /new PaseoTree|postDelayed/);
   assert.match(s, /saved\.refresh\(\)/);
   assert.match(s, /saved\.equals\(focused\)/);
   assert.match(insertion, /ACTION_SET_TEXT/);
-  assert.doesNotMatch(entry + insertion, /draft already exists|draft exists|editor\.text\.isEmpty\(\)/);
+  assert.match(insertion, /PaseoSelection\.append\(editor\.text, transcript\)/);
   assert.match(s, /mFlowGate\.check\(tree == null \? null : tree\.root, editor, expected,/);
   assert.match(s, /target\.refresh\(\)/);
   assert.match(s, /new PaseoTree\(mFlowComposer, root\)/);
@@ -49,5 +52,5 @@ test('native path is isolated from generic multi-send and retains clipboard/hist
   const observation = s.split('private void observePaseoFlow()')[1].split('private CharSequence readPasteText')[0];
   assert.doesNotMatch(observation, /new PaseoTree/);
   assert.match(s, /paseoFeedback\("Copied —/);
-  assert.match(s, /ACTION_IME_ENTER/); // unchanged other-app path
+  assert.doesNotMatch(s, /ACTION_IME_ENTER/);
 });

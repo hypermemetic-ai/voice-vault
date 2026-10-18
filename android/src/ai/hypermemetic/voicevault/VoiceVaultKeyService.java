@@ -9,6 +9,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.graphics.Rect;
@@ -24,26 +25,20 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import java.util.List;
-import java.util.Locale;
 
 /**
- * Hardware volume-key controller for Dictation Mode.
+ * Hardware volume-key controller for Dictation Mode. Taps act on release; holds
+ * ({@link #HOLD_MS}) act while pressed.
  *
  * <ul>
- *   <li>Dictation Mode OFF:
+ *   <li>Dictation Mode OFF: hold Volume Up enables Dictation Mode. A Volume Up tap
+ *       raises the volume (with the slider); Volume Down is untouched.</li>
+ *   <li>Dictation Mode ON (both keys consumed, system volume never changes):
  *     <ul>
- *       <li>Single Volume Up & Down: pass through to the system normally.</li>
- *       <li>Double-press Volume Up: enables Dictation Mode (replaces tapping the tile).</li>
+ *       <li>Tap Volume Up: start/stop recording. Hold: disable Dictation Mode.</li>
+ *       <li>Tap Volume Down: finish, insert into the focused composer (added to any
+ *           draft) and send when Auto-send is on. Hold: toggle Auto-send.</li>
  *     </ul>
- *   </li>
- *   <li>Dictation Mode ON:
- *     <ul>
- *       <li>Single Volume Up: toggles recording (start/stop + Whisper transcription).</li>
- *       <li>Double-press Volume Up: disables Dictation Mode.</li>
- *       <li>Single Volume Down: stops/waits for transcription, then inserts (and auto-sends if enabled).</li>
- *       <li>Double Volume Down toggles auto-send; the dashboard checkbox shows the same setting.</li>
- *     </ul>
- *     Both keys are consumed so the system volume never changes.
  *   </li>
  * </ul>
  *
@@ -55,18 +50,16 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private static final String PREFS_NAME = "voice_vault_prefs";
     private static final String PREF_DICTATION_MODE = "pref_dictation_mode_enabled";
     private static final String PREF_AUTO_SEND = "pref_auto_send_on_paste";
-    private static final long IME_ENTER_DELAY_MS = 60;
-    private static final long FOLLOWUP_SEND_DELAY_MS = 240;
 
     private static volatile VoiceVaultKeyService sInstance = null;
 
     private final Handler mKeyHandler = new Handler(Looper.getMainLooper());
-    private final VolumeUpTiming mVolUpTiming = new VolumeUpTiming();
-    private final VolumeUpTiming mVolDnTiming = new VolumeUpTiming();
-    private Runnable mPendingVolDnRunnable;
-    private boolean mConsumedUp, mConsumedDown;
+    static final long HOLD_MS = 500;
+    // Per-key press state: owned until release; a hold acts once while pressed.
+    private boolean mOwnUp, mOwnDown, mHeldUp, mHeldDown, mModeAtPressUp;
+    private int mPressGenUp, mPressGenDown;
+    private Runnable mHoldUp, mHoldDown;
     private int mKeyGeneration;
-    private Runnable mPendingVolUpRunnable = null;
     private final PendingDictation mPendingDictation = new PendingDictation();
     private AccessibilityNodeInfo mPendingComposer;
     private long mPendingPaseoId = -1;
@@ -81,10 +74,15 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private boolean mFlowDispatched;
     private static final long PASEO_READY_TIMEOUT_MS = 2000L;
     private static final long PASEO_SEND_READY_TIMEOUT_MS = 5000L;
+    // Web composers (T3 Code in Chrome) clear after a round trip through React.
+    private static final long PASEO_CONFIRM_TIMEOUT_MS = 3000L;
+    private String mFlowSentLabel = "Sent";
     private SharedPreferences mModePrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener mModeListener = (prefs, key) -> {
         if (PREF_DICTATION_MODE.equals(key)) {
             cancelPendingKeyCallbacks();
+            FloatingPillOverlay.refreshMode(this);
+        } else if (PREF_AUTO_SEND.equals(key)) {
             FloatingPillOverlay.refreshMode(this);
         }
     };
@@ -134,16 +132,12 @@ public class VoiceVaultKeyService extends AccessibilityService {
         mPaseoGeneration++;
         clearFlowComposer();
         mPendingDictation.cancel();
-        mVolUpTiming.reset();
-        mVolDnTiming.reset();
+        // Keys stay owned until release so the system never sees half a press.
         mKeyGeneration++;
-        if (mPendingVolDnRunnable != null) mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
-        mPendingVolDnRunnable = null;
-        if (mPendingVolUpRunnable != null) {
-            mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
-            mPendingVolUpRunnable = null;
-        }
-
+        if (mHoldUp != null) mKeyHandler.removeCallbacks(mHoldUp);
+        if (mHoldDown != null) mKeyHandler.removeCallbacks(mHoldDown);
+        mHoldUp = null;
+        mHoldDown = null;
     }
 
     /**
@@ -208,129 +202,93 @@ public class VoiceVaultKeyService extends AccessibilityService {
         return false;
     }
 
+    /**
+     * Each volume key is either a tap (acts on release) or a hold (acts at
+     * {@link #HOLD_MS} while still pressed, with haptic confirmation). Key
+     * filtering returns at once; actions run on the handler.
+     */
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
         int keyCode = event.getKeyCode();
-        boolean isVolumeKey = keyCode == KeyEvent.KEYCODE_VOLUME_UP
-                || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN;
-        if (!isVolumeKey) {
-            return super.onKeyEvent(event);
-        }
+        boolean up = keyCode == KeyEvent.KEYCODE_VOLUME_UP;
+        if (!up && keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return super.onKeyEvent(event);
 
         if (event.getAction() == KeyEvent.ACTION_UP) {
-            boolean consumed = keyCode == KeyEvent.KEYCODE_VOLUME_UP ? mConsumedUp : mConsumedDown;
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) mConsumedUp = false; else mConsumedDown = false;
-            if (consumed) return true;
-        }
-        boolean dictationActive = isDictationModeEnabled();
-        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() > 0) {
-            return dictationActive || super.onKeyEvent(event);
-        }
-
-        // 1. When Dictation Mode is OFF:
-        // Double-pressing Volume Up toggles Dictation Mode ON (replaces tapping the tile).
-        // Single Volume Up and all Volume Down presses pass through to the system.
-        if (!dictationActive) {
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                    long now = SystemClock.uptimeMillis();
-                    if (mVolUpTiming.inactivePress(now)) {
-                        Log.i(TAG, "Dictation Mode OFF: Vol Up double-press -> ENABLE dictation mode");
-                        setDictationModeEnabled(true);
-                        notifyTileStateChanged();
-                        provideFeedback(true, "Dictation Mode: ON");
-                        mConsumedUp = true;
-                        return true; // Consume second press and its release
-                    } else {
-                        return super.onKeyEvent(event);
-                    }
-                }
-                return super.onKeyEvent(event);
+            if (!(up ? mOwnUp : mOwnDown)) return super.onKeyEvent(event);
+            boolean held = up ? mHeldUp : mHeldDown;
+            int generation = up ? mPressGenUp : mPressGenDown;
+            boolean modeAtPress = up ? mModeAtPressUp : true;
+            if (up) { mOwnUp = false; mHeldUp = false; } else { mOwnDown = false; mHeldDown = false; }
+            Runnable hold = up ? mHoldUp : mHoldDown;
+            if (hold != null) mKeyHandler.removeCallbacks(hold);
+            if (up) mHoldUp = null; else mHoldDown = null;
+            // A hold already acted; a mode change mid-press voids the tap.
+            if (!held && generation == mKeyGeneration) {
+                mKeyHandler.post(() -> {
+                    if (generation == mKeyGeneration) tapVolumeKey(up, modeAtPress);
+                });
             }
-            return super.onKeyEvent(event);
-        }
-
-        // 2. When Dictation Mode is ON:
-        // Intercept volume keys so system volume never changes.
-        if (event.getAction() == KeyEvent.ACTION_UP) {
             return true;
         }
+        if (event.getAction() != KeyEvent.ACTION_DOWN) return super.onKeyEvent(event);
+        if (event.getRepeatCount() > 0) return (up ? mOwnUp : mOwnDown) || super.onKeyEvent(event);
 
-        if (event.getAction() == KeyEvent.ACTION_DOWN) {
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) mConsumedUp = true; else mConsumedDown = true;
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                VolumeUpTiming.ActivePress press = mVolUpTiming.activePress(SystemClock.uptimeMillis());
-                if (press == VolumeUpTiming.ActivePress.DOUBLE) {
-                    // A double is valid only by uptime, not by a late queued callback.
-                    mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
-                    mPendingVolUpRunnable = null;
-                    Log.i(TAG, "Dictation Mode ON: Vol Up double-press -> DISABLE dictation mode");
-                    if (VoiceVaultService.isRecording()) {
-                        stopRecordingService();
-                    }
-                    setDictationModeEnabled(false);
-                    cancelPendingKeyCallbacks();
-                    notifyTileStateChanged();
-                    provideFeedback(false, "Dictation Mode: OFF");
-                    return true;
-                }
-                if (press == VolumeUpTiming.ActivePress.EXPIRED_FIRST) {
-                    // Handler may be late: honor the first single before starting a new window.
-                    mKeyHandler.removeCallbacks(mPendingVolUpRunnable);
-                    mPendingVolUpRunnable = null;
-                    Log.i(TAG, "Dictation Mode: expired Vol Up single-press -> toggle recording");
-                    toggleDictation();
-                }
-                // Run just after the inclusive 240ms boundary, so a press at 240ms can win.
-                Runnable single = new Runnable() {
-                    @Override public void run() {
-                        if (mPendingVolUpRunnable != this) return;
-                        mPendingVolUpRunnable = null;
-                        mVolUpTiming.activeSingleFinished();
-                        if (!isDictationModeEnabled()) return;
-                        Log.i(TAG, "Dictation Mode: Vol Up single-press -> toggle recording");
-                        toggleDictation();
-                    }
-                };
-                mPendingVolUpRunnable = single;
-                mKeyHandler.postDelayed(single, VolumeUpTiming.UP_WINDOW_MS + 1);
-                return true;
-            } else if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-                VolumeUpTiming.ActivePress press = mVolDnTiming.activePress(SystemClock.uptimeMillis());
-                if (press == VolumeUpTiming.ActivePress.DOUBLE) {
-                    mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
-                    mPendingVolDnRunnable = null;
-                    final int generation = mKeyGeneration;
-                    mKeyHandler.post(() -> {
-                        if (generation != mKeyGeneration || !isDictationModeEnabled()) return;
-                        boolean enabled = !isAutoSendEnabled();
-                        setAutoSendEnabled(enabled);
-                        provideFeedback(enabled, "Auto-send: " + (enabled ? "ON" : "OFF"));
-                    });
-                    return true;
-                }
-                if (press == VolumeUpTiming.ActivePress.EXPIRED_FIRST) {
-                    mKeyHandler.removeCallbacks(mPendingVolDnRunnable);
-                    final int generation = mKeyGeneration;
-                    mKeyHandler.post(() -> {
-                        if (generation == mKeyGeneration && isDictationModeEnabled()) finishAndInsert();
-                    });
-                }
-                Runnable single = new Runnable() {
-                    @Override public void run() {
-                        if (mPendingVolDnRunnable != this) return;
-                        mPendingVolDnRunnable = null;
-                        mVolDnTiming.activeSingleFinished();
-                        if (isDictationModeEnabled()) finishAndInsert();
-                    }
-                };
-                mPendingVolDnRunnable = single;
-                mKeyHandler.postDelayed(single, VolumeUpTiming.UP_WINDOW_MS + 1);
-                return true;
+        boolean mode = isDictationModeEnabled();
+        // Dictation Mode OFF: Volume Down is the system's.
+        if (!mode && !up) return super.onKeyEvent(event);
+        final int generation = mKeyGeneration;
+        Runnable hold = new Runnable() {
+            @Override public void run() {
+                if ((up ? mHoldUp : mHoldDown) != this) return;
+                if (up) { mHoldUp = null; mHeldUp = true; } else { mHoldDown = null; mHeldDown = true; }
+                if (generation == mKeyGeneration) holdVolumeKey(up, mode);
             }
+        };
+        if (up) {
+            if (mHoldUp != null) mKeyHandler.removeCallbacks(mHoldUp);
+            mOwnUp = true; mHeldUp = false; mPressGenUp = generation; mModeAtPressUp = mode; mHoldUp = hold;
+        } else {
+            if (mHoldDown != null) mKeyHandler.removeCallbacks(mHoldDown);
+            mOwnDown = true; mHeldDown = false; mPressGenDown = generation; mHoldDown = hold;
         }
-
+        mKeyHandler.postDelayed(hold, HOLD_MS);
         return true;
+    }
+
+    private void tapVolumeKey(boolean up, boolean modeAtPress) {
+        if (up && !modeAtPress) {
+            // The press was held back to tell tap from hold; give it to the system now.
+            raiseVolume();
+            return;
+        }
+        if (!isDictationModeEnabled()) return;
+        if (up) {
+            Log.i(TAG, "Dictation Mode: Vol Up tap -> toggle recording");
+            toggleDictation();
+        } else {
+            Log.i(TAG, "Dictation Mode: Vol Down tap -> finish and insert");
+            finishAndInsert();
+        }
+    }
+
+    private void holdVolumeKey(boolean up, boolean modeAtPress) {
+        if (up && !modeAtPress) {
+            Log.i(TAG, "Dictation Mode OFF: Vol Up hold -> ENABLE dictation mode");
+            setDictationModeEnabled(true);
+            notifyTileStateChanged();
+            provideFeedback(true, "Dictation Mode: ON");
+        } else if (up) {
+            Log.i(TAG, "Dictation Mode ON: Vol Up hold -> DISABLE dictation mode");
+            if (VoiceVaultService.isRecording()) stopRecordingService();
+            setDictationModeEnabled(false);
+            cancelPendingKeyCallbacks();
+            notifyTileStateChanged();
+            provideFeedback(false, "Dictation Mode: OFF");
+        } else if (isDictationModeEnabled()) {
+            boolean enabled = !isAutoSendEnabled();
+            setAutoSendEnabled(enabled);
+            provideFeedback(enabled, "Auto-send: " + (enabled ? "ON" : "OFF"));
+        }
     }
 
     private void stopRecordingService() {
@@ -346,6 +304,16 @@ public class VoiceVaultKeyService extends AccessibilityService {
             mPendingDictation.cancel();
             clearPendingComposer();
             Log.w(TAG, "Failed to stop recording service", t);
+        }
+    }
+
+    private void raiseVolume() {
+        try {
+            AudioManager audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (audio != null) audio.adjustSuggestedStreamVolume(AudioManager.ADJUST_RAISE,
+                    AudioManager.USE_DEFAULT_STREAM_TYPE, AudioManager.FLAG_SHOW_UI);
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to raise volume", t);
         }
     }
 
@@ -367,16 +335,9 @@ public class VoiceVaultKeyService extends AccessibilityService {
         }
     }
 
+    /** Visual + haptic only; Voice Vault plays no sounds. */
     private void provideFeedback(boolean positive, String message) {
         FloatingPillOverlay.showFeedback(this, message, positive);
-
-        try {
-            if (positive) {
-                SoundEffects.playStartPop();
-            } else {
-                SoundEffects.playSuccessChime();
-            }
-        } catch (Throwable ignored) {}
 
         try {
             Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
@@ -419,13 +380,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
             if (root != null && root.getPackageName() != null) {
                 String pkg = root.getPackageName().toString();
                 mPendingDictation.begin(VoiceVaultService.getRecordingStartTime(), pkg, root.getWindowId());
-                if (PaseoSelection.isPaseo(pkg)) {
-                    mPendingPaseoId = VoiceVaultService.getRecordingStartTime();
-                    try (PaseoTree tree = new PaseoTree(root)) {
-                        PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
-                        if (editor != null) mPendingComposer = AccessibilityNodeInfo.obtain((AccessibilityNodeInfo) editor.handle);
-                    }
-                }
+                mPendingPaseoId = VoiceVaultService.getRecordingStartTime();
+                mPendingComposer = findComposer(root);
             }
         } finally {
             if (root != null) root.recycle();
@@ -444,27 +400,17 @@ public class VoiceVaultKeyService extends AccessibilityService {
             String packageName = root == null || root.getPackageName() == null
                     ? null : root.getPackageName().toString();
             int windowId = root == null ? -1 : root.getWindowId();
-            boolean sameComposer = true;
-            boolean paseo = PaseoSelection.isPaseo(packageName);
-            if (paseo) {
-                // This input was uniquely validated at recording completion request.
-                // Refresh native identity and focus, not the entire chat history.
-                sameComposer = currentComposer(root, mPendingComposer) != null;
-                if (!sameComposer && root != null && mPendingComposer != null) {
-                    try (PaseoTree tree = new PaseoTree(root)) {
-                        PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
-                        sameComposer = editor != null && mPendingComposer.equals(editor.handle);
-                    }
-                }
-            }
+            // The input chosen when Vol Down was pressed must still be the live
+            // composer. Refresh its native identity, not the entire chat history.
+            // No input was found then: discover one now, as for a clipboard paste.
+            boolean sameComposer = mPendingComposer == null || currentComposer(root, mPendingComposer) != null;
             String result = mPendingDictation.complete(recordingId, text, packageName, windowId);
             if (recordingId == mPendingPaseoId) mPendingPaseoId = -1;
-            // A manual reset/navigation can remount Paseo's input while transcription
+            // A manual reset/navigation can remount the input while transcription
             // is pending. Keep the copied result, but don't insert or report a failure
             // after the user's action. Identity is never transferred to the new input.
-            if (result != null && sameComposer) {
-                if (paseo) pasteIntoPaseo(root, result, mPendingComposer);
-                else pasteIntoFocusedField(result);
+            if (result != null && sameComposer && packageName != null) {
+                pasteIntoPaseo(root, result, mPendingComposer);
             }
         } finally {
             clearPendingComposer();
@@ -520,145 +466,22 @@ public class VoiceVaultKeyService extends AccessibilityService {
         }
     }
 
-    /**
-     * Pastes the clipboard into the focused editable field of the active
-     * window. Auto-focuses an editable field if none currently has focus.
-     * Uses 0ms ACTION_SET_TEXT with ACTION_PASTE fallback.
-     * Auto-sends via ACTION_IME_ENTER and findAndClickSendButton when enabled.
-     */
+    /** Inserts the clipboard (or latest transcript) into the focused app's composer. */
     private void pasteIntoFocusedField() {
         pasteIntoFocusedField(null);
     }
 
     private void pasteIntoFocusedField(String completedTranscript) {
-        // Paseo never enters the generic IME / broad-button / repeated-send path.
         AccessibilityNodeInfo appRoot = getApplicationRoot();
-        if (appRoot != null) {
-            try {
-                String pkg = appRoot.getPackageName() == null ? null : appRoot.getPackageName().toString();
-                if (PaseoSelection.isPaseo(pkg)) {
-                    pasteIntoPaseo(appRoot, completedTranscript);
-                    return;
-                }
-            } finally { appRoot.recycle(); }
+        if (appRoot == null || appRoot.getPackageName() == null) {
+            if (appRoot != null) appRoot.recycle();
+            FloatingPillOverlay.showFeedback(this, "Copied — open composer, then Vol Down", false);
+            return;
         }
-        AccessibilityNodeInfo target = null;
-        AccessibilityNodeInfo root = null;
         try {
-            root = getApplicationRoot();
-            if (root == null) {
-                Log.i(TAG, "Paste: no active window root");
-                return;
-            }
-
-            target = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-            if (target != null) {
-                CharSequence cls = target.getClassName();
-                boolean isEditClass = cls != null && cls.toString().contains("EditText");
-                if (!target.isEditable() && !isEditClass) {
-                    target.recycle();
-                    target = null;
-                }
-            }
-            if (target == null) {
-                target = findFocusedEditable(root);
-            }
-            if (target == null) {
-                target = findEditableNode(root);
-                if (target != null) {
-                    target.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-                }
-            }
-            if (target == null) {
-                Log.i(TAG, "Paste: no focused editable field");
-                FloatingPillOverlay.showFeedback(this, "Copied — open composer, then Vol Down", false);
-                return;
-            }
-            Log.i(TAG, "Paste: found target node: " + target.getClassName() + " / id=" + target.getViewIdResourceName() + " / editable=" + target.isEditable() + " / focused=" + target.isFocused());
-
-            CharSequence clipText = readPasteText(completedTranscript);
-
-            boolean pasted = false;
-            if (clipText != null && clipText.length() > 0) {
-                Bundle args = new Bundle();
-                args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, clipText);
-                pasted = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-                Log.i(TAG, "Paste: ACTION_SET_TEXT dispatched, accepted=" + pasted);
-            }
-            if (!pasted) {
-                pasted = target.performAction(AccessibilityNodeInfo.ACTION_PASTE);
-                Log.i(TAG, "Paste: ACTION_PASTE dispatched, accepted=" + pasted);
-            }
-
-            if (pasted && isAutoSendEnabled()) {
-                final AccessibilityNodeInfo sendTarget = AccessibilityNodeInfo.obtain(target);
-                new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                    try {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                            int imeEnter = AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId();
-                            boolean sent = sendTarget.performAction(imeEnter);
-                            Log.i(TAG, "Paste: ACTION_IME_ENTER dispatched, accepted=" + sent);
-                        }
-                    } catch (Throwable t) {
-                        Log.w(TAG, "Paste: auto-send IME_ENTER failed", t);
-                    } finally {
-                        sendTarget.recycle();
-                    }
-
-                    AccessibilityNodeInfo sendRoot = null;
-                    try {
-                        sendRoot = getRootInActiveWindow();
-                        if (sendRoot != null) {
-                            boolean clicked = findAndClickSendButton(sendRoot);
-                            Log.i(TAG, "Paste: findAndClickSendButton dispatched, accepted=" + clicked);
-                        }
-                    } catch (Throwable t) {
-                        Log.w(TAG, "Paste: findAndClickSendButton failed", t);
-                    } finally {
-                        if (sendRoot != null) {
-                            sendRoot.recycle();
-                        }
-                    }
-                }, IME_ENTER_DELAY_MS);
-
-                // Follow-up for editors that first accept an IME action without submitting.
-                new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                    AccessibilityNodeInfo stage2Root = null;
-                    try {
-                        stage2Root = getRootInActiveWindow();
-                        if (stage2Root != null) {
-                            AccessibilityNodeInfo stage2Focus = stage2Root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-                            if (stage2Focus != null) {
-                                try {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                        int imeEnter = AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId();
-                                        boolean stage2Sent = stage2Focus.performAction(imeEnter);
-                                        Log.i(TAG, "Paste: stage 2 IME_ENTER dispatched, accepted=" + stage2Sent);
-                                    }
-                                } finally {
-                                    stage2Focus.recycle();
-                                }
-                            }
-                            boolean stage2Clicked = findAndClickSendButton(stage2Root);
-                            Log.i(TAG, "Paste: stage 2 findAndClickSendButton accepted=" + stage2Clicked);
-                        }
-                    } catch (Throwable t) {
-                        Log.w(TAG, "Paste: stage 2 auto-send failed", t);
-                    } finally {
-                        if (stage2Root != null) {
-                            stage2Root.recycle();
-                        }
-                    }
-                }, FOLLOWUP_SEND_DELAY_MS);
-            }
-
-            autoDismissClipboardOverlay();
-        } catch (Throwable t) {
-            Log.w(TAG, "Paste: failed", t);
-        } finally {
-            if (target != null) target.recycle();
-            if (root != null) root.recycle();
-        }
+            pasteIntoPaseo(appRoot, completedTranscript);
+        } finally { appRoot.recycle(); }
+        autoDismissClipboardOverlay();
     }
 
 
@@ -677,6 +500,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
         mFlowPackage = null;
         mPaseoDeadline = 0;
         mFlowDispatched = false;
+        mFlowSentLabel = "Sent";
         if (mPaseoCheck != null) mKeyHandler.removeCallbacks(mPaseoCheck);
         mPaseoCheck = null;
     }
@@ -689,9 +513,11 @@ public class VoiceVaultKeyService extends AccessibilityService {
 
         // The Android screen is the contract. Query the nearest native input
         // group with controls, including disabled controls that may become ready.
-        // A platform text query avoids walking every message in a flattened chat.
+        // A platform text query avoids walking every message in a flattened chat;
+        // a small bounded walk covers providers whose text query finds nothing.
         PaseoTree(AccessibilityNodeInfo composer, AccessibilityNodeInfo application) {
-            PaseoSelection.Node found = null;
+            PaseoSelection.Node found = null, nearest = null;
+            int widened = 0;
             AccessibilityNodeInfo parent = composer.getParent();
             for (int depth = 0; parent != null && depth < 32; depth++) {
                 owned.add(parent);
@@ -701,7 +527,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 PaseoSelection.Node scope = describe(parent);
                 scope.scoped = true;
                 scope.children.add(describe(composer));
-                for (String query : new String[] {"Send", "Queue", "Submit"}) {
+                for (String query : new String[] {"Send", "Queue", "Submit", "Steer"}) {
                     java.util.List<AccessibilityNodeInfo> results = parent.findAccessibilityNodeInfosByText(query);
                     if (results == null) continue;
                     for (AccessibilityNodeInfo result : results) {
@@ -709,24 +535,46 @@ public class VoiceVaultKeyService extends AccessibilityService {
                         if (!result.refresh() || result.getPackageName() == null
                                 || !application.getPackageName().toString().equals(result.getPackageName().toString())
                                 || result.getWindowId() != application.getWindowId()) continue;
-                        PaseoSelection.Node button = describe(result);
-                        if (button.editable || !button.visible || !button.clickable
-                                || !PaseoSelection.primary(button.label)) continue;
-                        boolean duplicate = false;
-                        for (PaseoSelection.Node child : scope.children)
-                            if (result.equals(child.handle)) { duplicate = true; break; }
-                        if (!duplicate && belongsTo(result, parent)) scope.children.add(button);
+                        if (belongsTo(result, parent)) addSubmit(scope, result);
                     }
                 }
-                // Keep the nearest form even when its Send isn't mounted yet;
-                // don't escape to an unrelated Send elsewhere in the window.
-                if (scope.children.size() > 1 || hasControls(parent, composer, new int[] {128})
-                        || parent.equals(application)) { found = scope; break; }
+                if (scope.children.size() > 1) { found = scope; break; }
+                boolean form = hasControls(parent, composer, new int[] {128});
+                if (form || parent.equals(application)) {
+                    findSubmit(scope, parent, composer, new int[] {160});
+                    if (scope.children.size() > 1) { found = scope; break; }
+                    // Keep the nearest form even when its Send isn't mounted yet.
+                    // Widen only slightly: a web composer nests its toolbar a
+                    // level or two above the editor, never across the window.
+                    if (nearest == null) nearest = scope;
+                    if (parent.equals(application) || ++widened > 2) break;
+                }
                 AccessibilityNodeInfo next = parent.getParent();
                 if (depth == 31 && next != null) owned.add(next);
                 parent = next;
             }
-            root = found;
+            root = found != null ? found : nearest;
+        }
+
+        private static void addSubmit(PaseoSelection.Node scope, AccessibilityNodeInfo result) {
+            PaseoSelection.Node button = describe(result);
+            if (button.editable || !button.visible || !button.clickable
+                    || !PaseoSelection.primary(button.label)) return;
+            for (PaseoSelection.Node child : scope.children)
+                if (result.equals(child.handle)) return;
+            scope.children.add(button);
+        }
+
+        private void findSubmit(PaseoSelection.Node scope, AccessibilityNodeInfo node,
+                AccessibilityNodeInfo editor, int[] budget) {
+            for (int i = 0; i < node.getChildCount() && --budget[0] >= 0; i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child == null) continue;
+                owned.add(child);
+                if (editor.equals(child)) continue;
+                if (PaseoSelection.primary(describe(child).label) && child.refresh()) addSubmit(scope, child);
+                findSubmit(scope, child, editor, budget);
+            }
         }
 
         private static boolean hasControls(AccessibilityNodeInfo node, AccessibilityNodeInfo editor, int[] budget) {
@@ -735,8 +583,9 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 AccessibilityNodeInfo child = node.getChild(i);
                 if (child == null) continue;
                 try {
-                    if (!child.refresh()) continue;
-                    if (!editor.equals(child) && child.isVisibleToUser() && !child.isEditable() && child.isClickable()) return true;
+                    // The draft's own contents (chips, links) are not composer controls.
+                    if (editor.equals(child) || !child.refresh()) continue;
+                    if (child.isVisibleToUser() && !child.isEditable() && child.isClickable()) return true;
                     if (hasControls(child, editor, budget)) return true;
                 } finally { child.recycle(); }
             }
@@ -757,8 +606,14 @@ public class VoiceVaultKeyService extends AccessibilityService {
             // Editable text is never an identity label: it may be a user's draft.
             n.label = desc != null ? desc.toString() : hint != null ? hint.toString()
                     : !n.editable && text != null ? text.toString() : null;
+            // Chrome exposes a web button's aria-label as text and may put a
+            // tooltip/description in the other fields; any exact submit name counts.
+            if (!n.editable && !PaseoSelection.primary(n.label)) {
+                if (text != null && PaseoSelection.primary(text.toString())) n.label = text.toString();
+                else if (hint != null && PaseoSelection.primary(hint.toString())) n.label = hint.toString();
+            }
             n.text = PaseoSelection.draftText(n.editable,
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && info.isShowingHintText(), text);
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && info.isShowingHintText(), text, hint);
             n.handle = info;
             return n;
         }
@@ -787,18 +642,34 @@ public class VoiceVaultKeyService extends AccessibilityService {
         pasteIntoPaseo(initialRoot, transcript, null);
     }
 
-    /** Require the same fresh native input identity as the OS focus. */
+    /**
+     * The saved input must still be live, editable and visible in the same window,
+     * and no other editable input may have taken the OS input focus. A closed
+     * keyboard or focus on a button does not make it a different composer.
+     */
     private PaseoSelection.Node currentComposer(AccessibilityNodeInfo root, AccessibilityNodeInfo saved) {
         if (root == null || saved == null || !saved.refresh()
                 || saved.getWindowId() != root.getWindowId()
                 || saved.getPackageName() == null || root.getPackageName() == null
-                || !saved.getPackageName().equals(root.getPackageName())) return null;
+                || !saved.getPackageName().toString().equals(root.getPackageName().toString())) return null;
         PaseoSelection.Node editor = PaseoTree.describe(saved);
-        if (!editor.editable || !editor.visible || !editor.enabled
-                || !saved.isFocused()) return null;
+        if (!editor.editable || !editor.visible || !editor.enabled) return null;
         AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-        try { return saved.equals(focused) ? editor : null; }
+        try { return focused == null || saved.equals(focused) || !focused.isEditable() ? editor : null; }
         finally { if (focused != null) focused.recycle(); }
+    }
+
+    /** The OS input focus first (no traversal); otherwise the window's only visible input. */
+    private AccessibilityNodeInfo findComposer(AccessibilityNodeInfo root) {
+        if (root == null) return null;
+        AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        try {
+            if (focused != null && currentComposer(root, focused) != null) return AccessibilityNodeInfo.obtain(focused);
+        } finally { if (focused != null) focused.recycle(); }
+        try (PaseoTree tree = new PaseoTree(root)) {
+            PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
+            return editor == null ? null : AccessibilityNodeInfo.obtain((AccessibilityNodeInfo) editor.handle);
+        }
     }
 
     private void pasteIntoPaseo(AccessibilityNodeInfo initialRoot, String transcript,
@@ -811,44 +682,23 @@ public class VoiceVaultKeyService extends AccessibilityService {
         final String pkg = initialRoot.getPackageName().toString();
         final int window = initialRoot.getWindowId();
         try {
-            if (validated != null && currentComposer(initialRoot, validated) != null) {
+            if (validated != null) {
+                if (currentComposer(initialRoot, validated) == null) {
+                    paseoFeedback("Copied — composer unavailable"); return;
+                }
                 mFlowComposer = AccessibilityNodeInfo.obtain(validated);
             } else {
-                // The OS input focus is authoritative for clipboard insertion too.
-                AccessibilityNodeInfo focused = initialRoot.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-                try {
-                    if (validated == null && currentComposer(initialRoot, focused) != null) {
-                        mFlowComposer = AccessibilityNodeInfo.obtain(focused);
-                    }
-                } finally { if (focused != null) focused.recycle(); }
-                // Only genuinely unfocused/uncertain input needs discovery.
-                if (mFlowComposer == null) try (PaseoTree tree = new PaseoTree(initialRoot)) {
-                    PaseoSelection.Node editor = PaseoSelection.composer(tree.root);
-                    if (editor == null || (validated != null && !validated.equals(editor.handle))) {
-                        paseoFeedback("Copied — composer unavailable"); return;
-                    }
-                    mFlowComposer = AccessibilityNodeInfo.obtain((AccessibilityNodeInfo) editor.handle);
-                }
+                mFlowComposer = findComposer(initialRoot);
+                if (mFlowComposer == null) { paseoFeedback("Copied — open composer, then Vol Down"); return; }
             }
             mFlowGate = new PaseoSelection.Gate();
             mFlowExpected = expected;
             mFlowWindow = window;
             mFlowPackage = pkg;
             mPaseoDeadline = SystemClock.uptimeMillis() + PASEO_READY_TIMEOUT_MS;
-            if (!mFlowComposer.isFocused()) {
-                if (!mFlowComposer.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) {
-                    paseoFeedback("Copied — composer not ready"); return;
-                }
-                if (currentComposer(initialRoot, mFlowComposer) != null) {
-                    insertPaseo(generation, pkg, window, expected);
-                } else {
-                    // Only a genuinely asynchronous/uncertain focus transition
-                    // needs the legacy bounded fallback, never a focused input.
-                    mKeyHandler.postDelayed(() -> insertPaseo(generation, pkg, window, expected), 80);
-                }
-            } else {
-                insertPaseo(generation, pkg, window, expected);
-            }
+            // Focus is a courtesy for the app; text insertion doesn't wait for it.
+            if (!mFlowComposer.isFocused()) mFlowComposer.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+            insertPaseo(generation, pkg, window, expected);
         } catch (Throwable t) {
             Log.w(TAG, "Paseo composer lookup failed", t);
             paseoFeedback("Copied — composer unavailable");
@@ -861,13 +711,16 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 && root.getWindowId() == window && mFlowWindow == window;
     }
 
-    private void insertPaseo(int generation, String pkg, int window, String expected) {
+    private void insertPaseo(int generation, String pkg, int window, String transcript) {
         if (generation != mPaseoGeneration) return;
         AccessibilityNodeInfo root = getApplicationRoot();
         try {
             if (!validPaseo(generation, pkg, window, root)) { cancelPaseoFlow(); return; }
             PaseoSelection.Node editor = currentComposer(root, mFlowComposer);
             if (editor == null) { cancelPaseoFlow(); return; }
+            // Add to whatever the user already typed; the combined draft is what gets sent.
+            final String expected = PaseoSelection.append(editor.text, transcript);
+            mFlowExpected = expected;
             Bundle args = new Bundle();
             args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, expected);
             if (!mFlowGate.write(editor.text) || !mFlowComposer.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
@@ -896,7 +749,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             observePaseoDraft(fresh, expected);
             if (mFlowGate.isCanceled()) { cancelPaseoFlow(); return; }
             // No toolbar query at all before exact echo, or for insertion-only.
-            boolean needToolbar = expected.equals(fresh.text) && isAutoSendEnabled();
+            boolean needToolbar = PaseoSelection.sameDraft(expected, fresh.text) && isAutoSendEnabled();
             try (PaseoTree tree = needToolbar ? new PaseoTree(mFlowComposer, root) : null) {
                 // getChild() may return Android's cached pre-SET_TEXT editor even
                 // after saved.refresh() observes the new text. Only the refreshed,
@@ -928,14 +781,16 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     }
                     PaseoSelection.Node echo = currentComposer(root, mFlowComposer);
                     observePaseoDraft(echo, expected);
-                    if (echo == null || !expected.equals(echo.text) || mFlowGate.isCanceled()) {
+                    if (echo == null || !PaseoSelection.sameDraft(expected, echo.text) || mFlowGate.isCanceled()) {
                         cancelPaseoFlow(); return;
                     }
                     // Consume before dispatch; action return or later UI state must never trigger a retry.
                     if (!mFlowGate.dispatch()) { cancelPaseoFlow(); return; }
                     mFlowDispatched = true;
-                    mPaseoDeadline = SystemClock.uptimeMillis() + 1500L;
-                    FloatingPillOverlay.showFeedback(this, "Sending to Paseo…", false);
+                    mFlowSentLabel = button.label.contains("Queue") ? "Queued"
+                            : button.label.contains("Steer") ? "Steered" : "Sent";
+                    mPaseoDeadline = SystemClock.uptimeMillis() + PASEO_CONFIRM_TIMEOUT_MS;
+                    FloatingPillOverlay.showFeedback(this, "Sending…", false);
                     boolean accepted = target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
                     if (!accepted) {
                         // Android rejected the semantic action; no accepted activation
@@ -982,8 +837,8 @@ public class VoiceVaultKeyService extends AccessibilityService {
                     editor = handle != null && handle.refresh() ? PaseoTree.describe(handle) : null;
                 }
             }
-            if (editor != null && editor.text.isEmpty()) { paseoFeedback("Submitted to Paseo"); return; }
-            if (editor != null && !expected.equals(editor.text)) { cancelPaseoFlow(); return; }
+            if (editor != null && PaseoSelection.blank(editor.text)) { sentFeedback(mFlowSentLabel); return; }
+            if (editor != null && !PaseoSelection.sameDraft(expected, editor.text)) { cancelPaseoFlow(); return; }
             // A normal submit tears down the old editor before its replacement
             // is exported. Wait within the confirmation budget; never resend.
 
@@ -1035,7 +890,12 @@ public class VoiceVaultKeyService extends AccessibilityService {
     private void cancelPaseoFlow() {
         boolean dispatched = mFlowDispatched;
         mPaseoGeneration++;
-        paseoFeedback(dispatched ? "Send not confirmed — check Paseo" : "Auto-send canceled");
+        paseoFeedback(dispatched ? "Send not confirmed — check app" : "Auto-send canceled");
+    }
+
+    private void sentFeedback(String label) {
+        clearFlowComposer();
+        FloatingPillOverlay.showFeedback(this, label + " ✓", true);
     }
 
     /** Give React its readiness budget once, after exact native insertion echo. */
@@ -1116,160 +976,19 @@ public class VoiceVaultKeyService extends AccessibilityService {
         return prefs.getBoolean(PREF_AUTO_SEND, true);
     }
 
-    /**
-     * Depth-first search for a focused, editable node. Used when
-     * {@code findFocus(FOCUS_INPUT)} returns null in some window configs.
-     */
-    private AccessibilityNodeInfo findFocusedEditable(AccessibilityNodeInfo node) {
-        if (node == null) return null;
-        if (node.isFocused() && node.isEditable()) {
-            return AccessibilityNodeInfo.obtain(node);
-        }
-        int children = node.getChildCount();
-        for (int i = 0; i < children; i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) continue;
-            try {
-                AccessibilityNodeInfo match = findFocusedEditable(child);
-                if (match != null) return match;
-            } finally {
-                child.recycle();
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Depth-first search for an editable node in the active window hierarchy.
-     * Used when neither findFocus(FOCUS_INPUT) nor findFocusedEditable finds a focused field
-     * (e.g. in a hybrid web chat before manual tap).
-     */
-    private AccessibilityNodeInfo findEditableNode(AccessibilityNodeInfo node) {
-        if (node == null) return null;
-        CharSequence cls = node.getClassName();
-        boolean isEditClass = cls != null && cls.toString().contains("EditText");
-        if (node.isEditable() || isEditClass) {
-            return AccessibilityNodeInfo.obtain(node);
-        }
-        int children = node.getChildCount();
-        for (int i = 0; i < children; i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) continue;
-            try {
-                AccessibilityNodeInfo match = findEditableNode(child);
-                if (match != null) return match;
-            } finally {
-                child.recycle();
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Traverses the active window hierarchy via DFS to find and click an on-screen
-     * send or submit button, traversing parents if the matched icon node is not clickable.
-     */
-    private boolean findAndClickSendButton(AccessibilityNodeInfo node) {
-        if (node == null) return false;
-        if (isSendMatch(node)) {
-            if (clickNodeOrParent(node)) {
-                return true;
-            }
-        }
-        int childCount = node.getChildCount();
-        for (int i = 0; i < childCount; i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) continue;
-            try {
-                if (findAndClickSendButton(child)) {
-                    return true;
-                }
-            } finally {
-                child.recycle();
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Checks if a node matches send/submit button keywords in contentDescription,
-     * text, or view ID (case-insensitive).
-     */
-    private boolean isSendMatch(AccessibilityNodeInfo node) {
-        if (node == null || node.isEditable()) return false;
-
-        CharSequence descCs = node.getContentDescription();
-        if (descCs != null) {
-            String desc = descCs.toString().trim().toLowerCase(Locale.US);
-            if (desc.equals("send") || desc.equals("submit")
-                    || desc.equals("send message") || desc.equals("send sms")
-                    || desc.contains("send") || desc.contains("submit")) {
-                return true;
-            }
-        }
-
-        CharSequence textCs = node.getText();
-        if (textCs != null) {
-            String text = textCs.toString().trim().toLowerCase(Locale.US);
-            if (text.equals("send") || text.equals("submit")
-                    || text.equals("send message") || text.equals("send sms")) {
-                return true;
-            }
-        }
-
-        String id = node.getViewIdResourceName();
-        if (id != null) {
-            String lowerId = id.toLowerCase(Locale.US);
-            if ((lowerId.contains("send") && !lowerId.contains("sender"))
-                    || lowerId.contains("submit")) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Clicks the node, or if it is not clickable, traverses up to 3 parent levels
-     * to find and click an enclosing clickable wrapper (e.g. icon button container).
-     */
-    private boolean clickNodeOrParent(AccessibilityNodeInfo node) {
-        if (node == null) return false;
-        if (node.isClickable() && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-            return true;
-        }
-        AccessibilityNodeInfo current = node.getParent();
-        for (int level = 0; level < 3 && current != null; level++) {
-            try {
-                if (current.isClickable() && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    current.recycle();
-                    return true;
-                }
-                AccessibilityNodeInfo parent = current.getParent();
-                current.recycle();
-                current = parent;
-            } catch (Throwable t) {
-                break;
-            }
-        }
-        if (current != null) {
-            current.recycle();
-        }
-        return node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-    }
-
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         int type = event.getEventType();
         String pkg = event.getPackageName() == null ? null : event.getPackageName().toString();
+        boolean flowApp = pkg != null && pkg.equals(mFlowPackage);
         if (mFlowComposer != null && !"com.android.systemui".equals(pkg)) {
-            if (!mFlowDispatched && PaseoSelection.isPaseo(pkg) && type == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            if (!mFlowDispatched && flowApp && type == AccessibilityEvent.TYPE_VIEW_CLICKED) {
                 AccessibilityNodeInfo source = event.getSource();
                 try {
                     if (source == null || !mFlowComposer.equals(source)) cancelPaseoFlow();
                 } finally { if (source != null) source.recycle(); }
             } else if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-                    || (PaseoSelection.isPaseo(pkg) && (type == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+                    || (flowApp && (type == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
                         || type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
                         || type == AccessibilityEvent.TYPE_VIEW_SCROLLED))) {
                 // Keyboard window changes are harmless if the application's exact
@@ -1297,7 +1016,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
             try {
                 String target = root == null || root.getPackageName() == null ? null : root.getPackageName().toString();
                 boolean valid = root != null && mPendingDictation.matchesWindow(target, root.getWindowId());
-                if (valid && PaseoSelection.isPaseo(target)) valid = currentComposer(root, mPendingComposer) != null;
+                if (valid && mPendingComposer != null) valid = currentComposer(root, mPendingComposer) != null;
                 if (!valid) {
                     mPendingDictation.cancel(); clearPendingComposer(); mPendingPaseoId = -1;
                 }
