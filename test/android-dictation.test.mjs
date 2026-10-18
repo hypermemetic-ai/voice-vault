@@ -113,8 +113,8 @@ test("manifest wires tile long-press and bumps version", () => {
     manifest.includes("android.service.quicksettings.action.QS_TILE_PREFERENCES"),
     "MainActivity must declare QS_TILE_PREFERENCES",
   );
-  assert.ok(manifest.includes('android:versionCode="26"'), "expected versionCode 26");
-  assert.ok(manifest.includes('android:versionName="1.4.0"'), "expected versionName 1.4.0");
+  assert.ok(manifest.includes('android:versionCode="27"'), "expected versionCode 27");
+  assert.ok(manifest.includes('android:versionName="1.4.1"'), "expected versionName 1.4.1");
 });
 
 test("VoiceVaultKeyService appends to the focused composer and sends via its own submit control", () => {
