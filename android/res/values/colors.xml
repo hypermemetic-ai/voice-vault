@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#07080b</color>
-    <color name="surface">#10121a</color>
-    <color name="surface_raised">#181b26</color>
-    <color name="border">#232738</color>
-    <color name="primary">#8b5cf6</color>
-    <color name="record">#ef4444</color>
-    <color name="success">#10b981</color>
-    <color name="text">#f3f4f6</color>
-    <color name="text_muted">#9ca3af</color>
+    <!-- Pitch-black, neutral greys. Colour is used only for state:
+         red = recording / problem, green = connected / OK. -->
+    <color name="bg">#000000</color>
+    <color name="surface">#0A0A0A</color>
+    <color name="surface_raised">#161616</color>
+    <color name="border">#2A2A2A</color>
+    <color name="divider">#161616</color>
+
+    <color name="text">#F2F2F2</color>
+    <color name="text_muted">#8C8C8C</color>
+    <color name="text_faint">#555555</color>
+
+    <color name="record">#EF4444</color>
+    <color name="success">#22C55E</color>
 </resources>

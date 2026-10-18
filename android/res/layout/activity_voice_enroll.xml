@@ -2,7 +2,7 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="@color/bg">
 
     <ScrollView
         android:layout_width="match_parent"
@@ -14,49 +14,42 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="20dp">
+            android:paddingStart="@dimen/space_xl"
+            android:paddingEnd="@dimen/space_xl"
+            android:paddingBottom="@dimen/space_xl">
 
-            <!-- Header -->
+            <!-- Top bar: title and close -->
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="56dp"
                 android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingBottom="8dp">
+                android:gravity="center_vertical">
 
                 <TextView
+                    style="@style/VV.Title"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="ENROLL YOUR VOICE"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp"
-                    android:textStyle="bold"
-                    android:fontFamily="@font/urw_gothic_demi"
-                    android:letterSpacing="0.08" />
+                    android:text="Enroll your voice" />
 
-                <TextView
+                <ImageButton
                     android:id="@+id/btn_close_enroll"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="✕"
-                    android:textColor="#888888"
-                    android:textSize="18sp"
-                    android:padding="6dp"
-                    android:clickable="true" />
+                    style="@style/VV.IconButton"
+                    android:layout_marginEnd="-14dp"
+                    android:src="@drawable/ic_close"
+                    android:contentDescription="Close enrollment"
+                    android:tooltipText="Close" />
             </LinearLayout>
 
             <TextView
+                style="@style/VV.Body"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Record three clips of about five seconds each. Voice Vault learns your vocal signature on the server and rejects other voices in the room before transcription."
-                android:textColor="#777777"
+                android:layout_marginBottom="@dimen/space_l"
+                android:textColor="@color/text_faint"
                 android:textSize="12sp"
-                android:fontFamily="@font/urw_gothic_book"
-                android:lineSpacingMultiplier="1.3"
-                android:layout_marginBottom="18dp" />
+                android:text="Record three clips of about five seconds each. Voice Vault learns your vocal signature on the server and rejects other voices in the room before transcription." />
 
-            <!-- Clip slots -->
             <TextView
                 android:id="@+id/tv_slot_1"
                 style="@style/VoiceVaultClipSlot"
@@ -76,89 +69,75 @@
                 android:id="@+id/tv_enroll_timer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="00:00"
-                android:textColor="#FFFFFF"
-                android:textSize="34sp"
-                android:textStyle="bold"
+                android:layout_marginTop="@dimen/space_xl"
+                android:layout_marginBottom="@dimen/space_xl"
                 android:gravity="center"
-                android:fontFamily="@font/urw_gothic_demi"
-                android:layout_marginTop="12dp"
-                android:layout_marginBottom="14dp" />
+                android:includeFontPadding="false"
+                android:text="00:00"
+                android:textColor="@color/text"
+                android:textSize="40sp"
+                android:fontFamily="@font/urw_gothic_demi" />
 
             <Button
                 android:id="@+id/btn_record_clip"
+                style="@style/VV.Button.Record"
                 android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:background="@drawable/bg_btn_red"
-                android:text="● RECORD CLIP"
-                android:textColor="#FFFFFF"
-                android:textSize="13sp"
-                android:fontFamily="@font/urw_gothic_demi"
-                android:layout_marginBottom="8dp" />
+                android:layout_height="56dp"
+                android:text="RECORD CLIP" />
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:layout_marginBottom="12dp">
+                android:layout_marginTop="@dimen/space_xs">
 
                 <Button
                     android:id="@+id/btn_submit_enroll"
+                    style="@style/VV.Button"
                     android:layout_width="0dp"
-                    android:layout_height="44dp"
+                    android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:layout_marginEnd="4dp"
-                    android:background="#1C1C1C"
-                    android:text="ENROLL VOICE"
-                    android:textColor="#FFFFFF"
-                    android:textSize="11sp"
-                    android:fontFamily="@font/urw_gothic_demi" />
+                    android:layout_marginEnd="@dimen/space_xs"
+                    android:text="ENROLL VOICE" />
 
                 <Button
                     android:id="@+id/btn_test_voice"
+                    style="@style/VV.Button"
                     android:layout_width="0dp"
-                    android:layout_height="44dp"
+                    android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:layout_marginStart="4dp"
-                    android:background="#1C1C1C"
-                    android:text="TEST MY VOICE"
-                    android:textColor="#FFFFFF"
-                    android:textSize="11sp"
-                    android:fontFamily="@font/urw_gothic_demi" />
+                    android:layout_marginStart="@dimen/space_xs"
+                    android:text="TEST MY VOICE" />
             </LinearLayout>
 
-            <Button
-                android:id="@+id/btn_remove_profile"
-                android:layout_width="match_parent"
-                android:layout_height="40dp"
-                android:background="#120808"
-                android:text="REMOVE VOICE PROFILE"
-                android:textColor="#EF4444"
-                android:textSize="11sp"
-                android:fontFamily="@font/urw_gothic_demi"
-                android:visibility="gone"
-                android:layout_marginBottom="12dp" />
-
+            <!-- Profile status: plain text, no surface. -->
             <TextView
                 android:id="@+id/tv_enroll_status"
+                style="@style/VV.Body"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Checking voice profile…"
-                android:textColor="#8A8A8A"
-                android:textSize="12sp"
-                android:fontFamily="@font/urw_gothic_book"
-                android:lineSpacingMultiplier="1.4" />
+                android:layout_marginTop="@dimen/space_xl"
+                android:text="Checking voice profile…" />
 
             <TextView
                 android:id="@+id/tv_enroll_result"
+                style="@style/VV.Body"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_m"
                 android:text=""
-                android:textColor="#22C55E"
-                android:textSize="12sp"
-                android:fontFamily="@font/urw_gothic_book"
-                android:lineSpacingMultiplier="1.4"
-                android:paddingTop="10dp"
+                android:textColor="@color/success"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/btn_remove_profile"
+                style="@style/VV.Button.Text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_s"
+                android:layout_marginStart="-12dp"
+                android:textColor="@color/record"
+                android:text="REMOVE VOICE PROFILE"
                 android:visibility="gone" />
         </LinearLayout>
     </ScrollView>

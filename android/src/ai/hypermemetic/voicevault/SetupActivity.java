@@ -4,9 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.StatusBarManager;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
+import android.content.res.ColorStateList;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -24,8 +23,8 @@ import java.util.Map;
  * In-app Setup &amp; Diagnostics Guide.
  *
  * <p>Every APK update or sideload can silently reset Android system settings
- * (Accessibility, overlay, battery optimization, permissions). Each card shows
- * a live pass/fail pill plus a 1-tap deep link to the system screen that fixes
+ * (Accessibility, overlay, battery optimization, permissions). Each section shows
+ * a live pass/fail status plus a 1-tap deep link to the system screen that fixes
  * it. {@link #onResume()} refreshes every pill so returning from system
  * settings immediately shows the new state.
  */
@@ -34,6 +33,7 @@ public class SetupActivity extends Activity {
 
     private LinearLayout mCards;
     private final Map<String, TextView> mPills = new LinkedHashMap<>();
+    private final Map<String, Button> mButtons = new LinkedHashMap<>();
     private Typeface mDemi;
     private Typeface mBook;
 
@@ -83,8 +83,8 @@ public class SetupActivity extends Activity {
 
     private void buildCards() {
         addCard("accessibility",
-                "1 · DICTATION KEYS (ACCESSIBILITY SERVICE)",
-                "Tap Volume Up to start/stop recording. Tap Volume Down to finish, add the text to the composer and send it when Auto-send is on. Hold Volume Down to toggle Auto-send; hold Volume Up to turn Dictation Mode on or off. "
+                "Dictation keys",
+                "The Accessibility service powers the volume keys. Tap Volume Up to start/stop recording. Tap Volume Down to finish, add the text after your draft in the composer and send it when Auto-send is on. Hold Volume Down to toggle Auto-send; hold Volume Up to turn Dictation Mode on or off. "
                         + "Android updates often switch this service off — when it is off, "
                         + "the volume buttons do nothing.",
                 "Android 13/14 sideload fix: if the toggle is greyed out as "
@@ -96,7 +96,7 @@ public class SetupActivity extends Activity {
                         SetupDiagnostics.accessibilitySettingsIntent()));
 
         addCard("mic",
-                "2 · MICROPHONE ACCESS",
+                "Microphone access",
                 "Beamforming audio capture (VOICE_RECOGNITION) needs the "
                         + "microphone. Without it, recording cannot start.",
                 null,
@@ -112,8 +112,8 @@ public class SetupActivity extends Activity {
                 });
 
         addCard("overlay",
-                "3 · DISPLAY OVER OTHER APPS (OVERLAY PILL)",
-                "Shows the floating recording timer pill on top of other apps "
+                "Display over other apps",
+                "Lets the floating recording timer pill show on top of other apps "
                         + "while you dictate.",
                 null,
                 "OPEN OVERLAY SETTINGS",
@@ -121,7 +121,7 @@ public class SetupActivity extends Activity {
                         SetupDiagnostics.overlaySettingsIntent(this)));
 
         addCard("battery",
-                "4 · UNRESTRICTED BATTERY",
+                "Unrestricted battery",
                 "Prevents Android Doze from freezing or killing background "
                         + "recordings during longer sessions.",
                 "On the next screen choose \"Unrestricted\" (not \"Optimized\").",
@@ -130,7 +130,7 @@ public class SetupActivity extends Activity {
                         SetupDiagnostics.batteryOptimizationIntent(this)));
 
         addCard("tile",
-                "5 · QUICK SETTINGS TILE",
+                "Quick Settings tile",
                 "The drop-down shade tile toggles Dictation Mode (volume keys "
                         + "capture). Long-press it to open the dashboard.",
                 "Manual add: swipe down twice → tap ✎ Edit → drag "
@@ -159,7 +159,7 @@ public class SetupActivity extends Activity {
                 });
 
         addCard("notifications",
-                "6 · NOTIFICATIONS",
+                "Notifications",
                 "Voice Vault runs silent by design (IMPORTANCE_MIN foreground "
                         + "channel). Keeping notifications blocked is recommended.",
                 null,
@@ -167,117 +167,100 @@ public class SetupActivity extends Activity {
                 v -> SetupDiagnostics.openSafely(this,
                         SetupDiagnostics.notificationSettingsIntent(this)));
 
-        addFooterCard();
-    }
-
-    private void addFooterCard() {
-        float density = getResources().getDisplayMetrics().density;
-        LinearLayout card = newCardContainer(density);
-
-        TextView title = new TextView(this);
-        title.setText("TROUBLESHOOTING AFTER UPDATES");
-        title.setTextColor(Color.parseColor("#FFFFFF"));
-        title.setTextSize(13f);
-        if (mDemi != null) title.setTypeface(mDemi);
-        card.addView(title);
-
-        TextView body = new TextView(this);
-        body.setText("• Dictation keys dead? Re-enable the Accessibility service in card 1.\n"
-                + "• Grey \"Restricted settings\" toggle? App Info → ⋮ → Allow restricted settings.\n"
-                + "• Recording dies mid-session? Set battery to Unrestricted (card 4).\n"
-                + "• No floating pill? Re-grant \"Display over other apps\" (card 3).\n"
-                + "• Statuses refresh automatically when you return from system settings.");
-        body.setTextColor(Color.parseColor("#999999"));
-        body.setTextSize(12f);
-        if (mBook != null) body.setTypeface(mBook);
-        body.setLineSpacing(0, 1.35f);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = Math.round(8 * density);
-        card.addView(body, lp);
-
-        mCards.addView(card);
     }
 
     private void addCard(String key, String title, String description,
                          String note, String buttonLabel, View.OnClickListener action) {
-        float density = getResources().getDisplayMetrics().density;
-        LinearLayout card = newCardContainer(density);
+        // One section per check: no surface, sections separated by a hairline.
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(0, dp(20), 0, dp(20));
+        if (mCards.getChildCount() > 0) {
+            View rule = new View(this);
+            rule.setBackgroundColor(getColor(R.color.divider));
+            mCards.addView(rule, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1))));
+        }
 
+        // Header: title and live status.
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView tvTitle = new TextView(this);
         tvTitle.setText(title);
-        tvTitle.setTextColor(Color.parseColor("#FFFFFF"));
-        tvTitle.setTextSize(13f);
+        tvTitle.setTextColor(getColor(R.color.text));
+        tvTitle.setTextSize(15f);
         if (mDemi != null) tvTitle.setTypeface(mDemi);
         LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        titleLp.rightMargin = Math.round(8 * density);
+        titleLp.rightMargin = dp(12);
         header.addView(tvTitle, titleLp);
 
         TextView pill = new TextView(this);
-        pill.setTextSize(11f);
-        if (mDemi != null) pill.setTypeface(mDemi);
-        pill.setPadding(Math.round(10 * density), Math.round(4 * density),
-                Math.round(10 * density), Math.round(4 * density));
-        header.addView(pill);
+        pill.setTextSize(12f);
+        if (mBook != null) pill.setTypeface(mBook);
+        pill.setSingleLine(true);
+        pill.setGravity(Gravity.CENTER_VERTICAL);
+        pill.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_dot, 0, 0, 0);
+        pill.setCompoundDrawablePadding(dp(8));
+        header.addView(pill, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         mPills.put(key, pill);
 
         card.addView(header);
 
         TextView tvDesc = new TextView(this);
         tvDesc.setText(description);
-        tvDesc.setTextColor(Color.parseColor("#999999"));
-        tvDesc.setTextSize(12f);
+        tvDesc.setTextColor(getColor(R.color.text_muted));
+        tvDesc.setTextSize(13f);
         if (mBook != null) tvDesc.setTypeface(mBook);
         tvDesc.setLineSpacing(0, 1.3f);
         LinearLayout.LayoutParams descLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        descLp.topMargin = Math.round(8 * density);
+        descLp.topMargin = dp(8);
         card.addView(tvDesc, descLp);
 
         if (note != null) {
             TextView tvNote = new TextView(this);
             tvNote.setText(note);
-            tvNote.setTextColor(Color.parseColor("#777777"));
-            tvNote.setTextSize(11f);
+            tvNote.setTextColor(getColor(R.color.text_faint));
+            tvNote.setTextSize(12f);
             if (mBook != null) tvNote.setTypeface(mBook);
             tvNote.setLineSpacing(0, 1.3f);
             LinearLayout.LayoutParams noteLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            noteLp.topMargin = Math.round(6 * density);
+            noteLp.topMargin = dp(8);
             card.addView(tvNote, noteLp);
         }
 
         Button button = new Button(this);
         button.setText(buttonLabel);
-        button.setBackgroundColor(Color.parseColor("#1C1C1C"));
-        button.setTextColor(Color.parseColor("#FFFFFF"));
-        button.setTextSize(11f);
+        button.setTextSize(12f);
+        button.setLetterSpacing(0.06f);
+        button.setAllCaps(true);
+        button.setStateListAnimator(null);
+        button.setBackgroundResource(R.drawable.bg_btn_tonal);
+        button.setPadding(dp(16), 0, dp(16), 0);
         if (mDemi != null) button.setTypeface(mDemi);
         LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, Math.round(44 * density));
-        btnLp.topMargin = Math.round(10 * density);
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
+        btnLp.topMargin = dp(12);
         card.addView(button, btnLp);
         button.setOnClickListener(action);
+        mButtons.put(key, button);
+        styleButton(button, false);
 
         mCards.addView(card);
     }
 
-    private LinearLayout newCardContainer(float density) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackgroundResource(R.drawable.bg_history_card);
-        int pad = Math.round(16 * density);
-        card.setPadding(pad, pad, pad, pad);
-        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        cardLp.bottomMargin = Math.round(12 * density);
-        card.setLayoutParams(cardLp);
-        return card;
+    /** A failing check gets full-strength button text; a passing one stays quiet. */
+    private void styleButton(Button button, boolean needsFix) {
+        button.setTextColor(getColor(needsFix ? R.color.text : R.color.text_muted));
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
     // ------------------------------------------------------------------
@@ -298,9 +281,10 @@ public class SetupActivity extends Activity {
         TextView notif = mPills.get("notifications");
         if (notif != null) {
             if (SetupDiagnostics.isNotificationBlocked(this)) {
-                stylePill(notif, true, "\u2705 Blocked (Recommended)");
+                stylePill(notif, true, "Blocked (Recommended)");
             } else {
-                stylePillWarn(notif, "\u26A0 Allowed");
+                // Allowed works; it is just not the recommended silent setup.
+                applyPill(notif, "Allowed", getColor(R.color.text_muted), getColor(R.color.text_faint));
             }
         }
     }
@@ -308,33 +292,20 @@ public class SetupActivity extends Activity {
     private void setPill(String key, boolean ok, String okLabel, String badLabel) {
         TextView pill = mPills.get(key);
         if (pill == null) return;
-        stylePill(pill, ok, ok ? "\u2705 " + okLabel : "\u274C " + badLabel);
+        stylePill(pill, ok, ok ? okLabel : badLabel);
+        Button button = mButtons.get(key);
+        if (button != null) styleButton(button, !ok);
     }
 
     private void stylePill(TextView pill, boolean ok, String text) {
-        pill.setText(text);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(999f);
-        if (ok) {
-            bg.setColor(Color.parseColor("#0F2A1A"));
-            bg.setStroke(2, Color.parseColor("#22C55E"));
-            pill.setTextColor(Color.parseColor("#22C55E"));
-        } else {
-            bg.setColor(Color.parseColor("#2A0F0F"));
-            bg.setStroke(2, Color.parseColor("#EF4444"));
-            pill.setTextColor(Color.parseColor("#EF4444"));
-        }
-        pill.setBackground(bg);
+        int c = getColor(ok ? R.color.success : R.color.record);
+        applyPill(pill, text, ok ? getColor(R.color.text_muted) : c, c);
     }
 
-    private void stylePillWarn(TextView pill, String text) {
+    private void applyPill(TextView pill, String text, int textColor, int dotColor) {
         pill.setText(text);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(999f);
-        bg.setColor(Color.parseColor("#2A230F"));
-        bg.setStroke(2, Color.parseColor("#EAB308"));
-        pill.setTextColor(Color.parseColor("#EAB308"));
-        pill.setBackground(bg);
+        pill.setTextColor(textColor);
+        pill.setCompoundDrawableTintList(ColorStateList.valueOf(dotColor));
     }
 
     @Override

@@ -114,7 +114,17 @@ public class VoiceEnrollActivity extends Activity {
             } catch (Exception e) {
                 mHandler.post(() -> {
                     mEnrolled = false;
-                    mStatus.setText("Voice profile unavailable: " + e.getMessage());
+                    // Short headline; the raw error stays available as a fainter detail line.
+                    android.text.SpannableStringBuilder msg = new android.text.SpannableStringBuilder(
+                            "Server offline — enrollment and testing are paused.");
+                    if (e.getMessage() != null) {
+                        int start = msg.length();
+                        msg.append('\n').append(e.getMessage());
+                        msg.setSpan(new android.text.style.ForegroundColorSpan(getColor(R.color.text_faint)),
+                                start, msg.length(), 0);
+                        msg.setSpan(new android.text.style.RelativeSizeSpan(0.9f), start, msg.length(), 0);
+                    }
+                    mStatus.setText(msg);
                     renderButtons();
                 });
             }
@@ -146,23 +156,29 @@ public class VoiceEnrollActivity extends Activity {
         mBtnSubmit.setEnabled(!mBusy && !mClips.isEmpty());
         mBtnTest.setEnabled(!mBusy && mEnrolled);
         mBtnRemove.setVisibility(mEnrolled ? View.VISIBLE : View.GONE);
-        mBtnRecord.setText(mRecording ? "■ STOP CLIP" : "● RECORD CLIP");
+        mBtnRecord.setText(mRecording ? "STOP CLIP" : "RECORD CLIP");
     }
 
     private void renderSlots() {
         TextView[] slots = {mSlot1, mSlot2, mSlot3};
         for (int i = 0; i < slots.length; i++) {
+            int dot;
             if (i < mClips.size()) {
-                slots[i].setText(String.format(Locale.US, "● Clip %d · captured (%.1fs)", i + 1,
+                slots[i].setText(String.format(Locale.US, "Clip %d · captured (%.1fs)", i + 1,
                         mClips.get(i).length() / 16000.0));
-                slots[i].setTextColor(0xFF22C55E);
+                slots[i].setTextColor(getColor(R.color.text));
+                dot = getColor(R.color.success);
             } else if (mRecording && i == mClips.size()) {
-                slots[i].setText("● Clip " + (i + 1) + " · recording…");
-                slots[i].setTextColor(0xFFEF4444);
+                slots[i].setText("Clip " + (i + 1) + " · recording…");
+                slots[i].setTextColor(getColor(R.color.text));
+                dot = getColor(R.color.record);
             } else {
-                slots[i].setText("○ Clip " + (i + 1) + " · not recorded");
-                slots[i].setTextColor(0xFF6F6F6F);
+                slots[i].setText("Clip " + (i + 1) + " · not recorded");
+                slots[i].setTextColor(getColor(R.color.text_faint));
+                dot = getColor(R.color.text_faint);
             }
+            // Status dot is the slot's vector drawableStart (see VoiceVaultClipSlot).
+            slots[i].setCompoundDrawableTintList(android.content.res.ColorStateList.valueOf(dot));
         }
     }
 
@@ -358,7 +374,7 @@ public class VoiceEnrollActivity extends Activity {
     private void showResult(String message, boolean good) {
         mResult.setVisibility(View.VISIBLE);
         mResult.setText(message);
-        mResult.setTextColor(good ? 0xFF22C55E : 0xFFEF4444);
+        mResult.setTextColor(getColor(good ? R.color.success : R.color.record));
     }
 
     @Override
