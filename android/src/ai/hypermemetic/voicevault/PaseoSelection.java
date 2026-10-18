@@ -3,19 +3,47 @@ package ai.hypermemetic.voicevault;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Screen semantics and native input identity; no application view IDs or layout rules. */
+/**
+ * Screen semantics and native input identity for any app's chat composer
+ * (T3 Code in Chrome, Paseo, messaging apps); no application view IDs or layout rules.
+ * The class name is historical: it began as the Paseo-only path.
+ */
 final class PaseoSelection {
     /** An editable node showing its platform hint has no user draft, even if getText returns the hint. */
     static String draftText(boolean editable, boolean showingHintText, CharSequence text) {
-        return (editable && showingHintText) || text == null ? "" : text.toString();
+        return draftText(editable, showingHintText, text, null);
+    }
+    /** Web editors may report their placeholder as text without flagging it as a hint. */
+    static String draftText(boolean editable, boolean showingHintText, CharSequence text, CharSequence hint) {
+        if ((editable && showingHintText) || text == null) return "";
+        String value = text.toString();
+        if (editable && hint != null && hint.length() > 0 && sameDraft(value, hint.toString())) return "";
+        return value;
     }
     static boolean isPaseo(String pkg) {
         return "sh.paseo".equals(pkg) || "sh.paseo.debug".equals(pkg);
     }
+    /** Accessibility text from web/native editors differs in NBSP, line breaks and trailing newlines. */
+    static String normalize(String text) {
+        if (text == null) return "";
+        return text.replace('\u00A0', ' ').replace("\u200B", "").replaceAll("\\s+", " ").trim();
+    }
+    static boolean sameDraft(String a, String b) { return normalize(a).equals(normalize(b)); }
+    static boolean blank(String text) { return normalize(text).isEmpty(); }
+    /** Dictation adds to the user's draft; it never replaces it. */
+    static String append(String draft, String addition) {
+        String add = addition == null ? "" : addition.trim();
+        if (blank(draft)) return add;
+        String kept = draft.replaceAll("[\\s\u00A0\u200B]+$", "");
+        return add.isEmpty() ? kept : kept + " " + add;
+    }
     static boolean primary(String label) {
         return "Send".equals(label) || "Submit".equals(label) || "Queue".equals(label)
                 || "Send message".equals(label) || "Queue message".equals(label)
-                || "Send and interrupt".equals(label) || "Send and steer".equals(label);
+                || "Send and interrupt".equals(label) || "Send and steer".equals(label)
+                // T3 Code composer (aria-label of its submit control by mode).
+                || "Submit message".equals(label) || "Steer message".equals(label)
+                || "Compact and send".equals(label) || "Update queued message".equals(label);
     }
     static final class Node {
         String label, text;
@@ -84,14 +112,14 @@ final class PaseoSelection {
             if (canceled || dispatched) return;
             if (editor == null) { cancel(); return; }
             if (!written) return;
-            if (expected.equals(editor.text)) echoed = true;
-            else if (echoed || (!editor.text.isEmpty() && !before.equals(editor.text))) cancel();
+            if (sameDraft(expected, editor.text)) echoed = true;
+            else if (echoed || (!blank(editor.text) && !sameDraft(before, editor.text))) cancel();
         }
         Status check(Node root, Node editor, String expected, boolean autoSend, boolean expired) {
             ready = false;
             observe(editor, expected);
             if (!written || dispatched || canceled) return Status.ABORT;
-            if (!expected.equals(editor.text)) return expired ? Status.UNCONFIRMED : Status.WAIT;
+            if (!sameDraft(expected, editor.text)) return expired ? Status.UNCONFIRMED : Status.WAIT;
             if (!autoSend) return Status.INSERTED;
             if (submit(root, editor) != null) { ready = true; return Status.SEND; }
             unavailable = unavailable(root, editor);

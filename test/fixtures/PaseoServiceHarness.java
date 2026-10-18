@@ -74,6 +74,7 @@ public class PaseoServiceHarness {
         java.util.List<AccessibilityNodeInfo> findAccessibilityNodeInfosByText(String text) {
             now+=IPC;
             java.util.List<AccessibilityNodeInfo> result=new java.util.ArrayList<>();
+            if (owner != null && owner.noTextSearch) return result;
             findText(this,text,result); return result;
         }
         static void findText(AccessibilityNodeInfo n,String text,java.util.List<AccessibilityNodeInfo> result) {
@@ -117,7 +118,7 @@ public class PaseoServiceHarness {
             }
             if (action==ACTION_SET_TEXT) {
                 writes++; writeAt=now; owner.childrenAtWrite=children; owner.idleAtWrite=timerIdle;
-                String value=args.value.toString();
+                String value=args.value.toString(); owner.lastWrite=value;
                 if(owner.echoDelay==0) { text=value; hint=false; }
                 else if(owner.echoDelay>0) owner.mKeyHandler.postDelayed(() -> { text=value; hint=false; owner.observePaseoFlow(); },owner.echoDelay);
                 return true;
@@ -138,10 +139,11 @@ public class PaseoServiceHarness {
     final PendingDictation mPendingDictation=new PendingDictation();
     AccessibilityNodeInfo root, editor, send, mPendingComposer, mFlowComposer;
     long mPendingPaseoId=-1; int mPaseoGeneration, mFlowWindow=-1, mPaseoAttempt;
-    long mPaseoDeadline; static final long PASEO_READY_TIMEOUT_MS=2000L, PASEO_SEND_READY_TIMEOUT_MS=5000L;
+    long mPaseoDeadline; static final long PASEO_READY_TIMEOUT_MS=2000L, PASEO_SEND_READY_TIMEOUT_MS=5000L, PASEO_CONFIRM_TIMEOUT_MS=3000L;
+    String mFlowSentLabel="Sent";
     PaseoSelection.Gate mFlowGate; String mFlowExpected, mFlowPackage;
     Runnable mPaseoCheck; boolean mFlowDispatched; boolean mode=true, auto=true, reject, gestureEnabled, neverReset, staleCache, staleReadiness, staleStop;
-    int gestures;
+    int gestures; boolean noTextSearch; String lastWrite;
     int echoDelay, focusDelay, childrenAtWrite, childrenAtClick; long idleAtWrite, idleAtClick; String feedback="sentinel";
     static final String TAG="test";
     boolean isDictationModeEnabled() { return mode; } boolean isAutoSendEnabled() { return auto; }
@@ -215,9 +217,9 @@ public class PaseoServiceHarness {
             check(writes==1 && clicks==1,"exact label "+label); check(s.childrenAtWrite==0,"focused no traversal before write"); cases++;
         }
         PaseoServiceHarness s=fixture(false,1000); s.editor.focused=false; s.complete(); s.mKeyHandler.run();
-        check(writes==1 && clicks==1,"unfocused fallback"); check(s.childrenAtWrite>5000,"fallback discovery"); cases++;
-        s=fixture(false,1000); s.editor.focused=false; s.focusDelay=25; s.complete(); check(writes==0,"wait only for asynchronous focus"); s.mKeyHandler.run();
-        check(writes==1 && clicks==1,"asynchronous focus fallback"); cases++;
+        check(writes==1 && clicks==1,"unfocused saved composer"); check(s.childrenAtWrite==0,"saved composer needs no discovery"); cases++;
+        s=fixture(false,1000); s.editor.focused=false; s.focusDelay=25; s.complete(); check(writes==1,"insertion does not wait for asynchronous focus"); s.mKeyHandler.run();
+        check(writes==1 && clicks==1,"asynchronous focus still sends once"); cases++;
         s=fixture(false,1000); s.auto=false; s.complete(); s.mKeyHandler.run(); check(writes==1 && clicks==0 && children==0,"insert-only no traversal"); cases++;
         s=fixture(false,1000); s.echoDelay=25; s.complete(); check(writes==1 && clicks==0 && children==0,"no query before echo"); s.mKeyHandler.run();
         check(clicks==1 && clickAt<100000,"event wakes send before fallback timer"); cases++;
@@ -300,12 +302,50 @@ public class PaseoServiceHarness {
         s=fixture(false,0); s.staleCache=true; s.complete(); s.mKeyHandler.run();
         check(clicks==1,"cached tree draft cannot override refreshed exact echo");
         s=fixture(false,0); s.gestureEnabled=true; s.reject=true; s.complete(); s.mKeyHandler.run();
-        check(s.gestures==1 && clicks==1 && s.feedback.equals("Submitted to Paseo"),"rejected click uses one native tap");
+        check(s.gestures==1 && clicks==1 && s.feedback.equals("Sent ✓"),"rejected click uses one native tap");
         s=fixture(false,0); s.gestureEnabled=true; s.neverReset=true; s.complete(); s.mKeyHandler.run();
         check(s.gestures==0 && clicks==1 && s.feedback.equals("Send not confirmed — tap Send"),"accepted ineffective action is never retried");
         s=fixture(false,0); s.send.enabled=false; s.complete();
         s.onAccessibilityEvent(new AccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SCROLLED,s.root));
         s.send.enabled=true; s.mKeyHandler.run(); check(clicks==1,"automatic non-editor scroll revalidates same composer");
+    }
+    /** T3 Code in Chrome: a web composer with a draft, nested toolbar and no text search. */
+    static void webComposerRegressions() {
+        PaseoServiceHarness s=fixture(false,0); s.complete(); s.mKeyHandler.run();
+        check("existing draft replacement".equals(s.lastWrite),"dictation is appended to the draft, got "+s.lastWrite);
+        check(writes==1 && clicks==1 && s.feedback.equals("Sent ✓"),"appended draft is sent once");
+
+        s=fixture(false,0); s.editor.text=""; s.complete(); s.mKeyHandler.run();
+        check("replacement".equals(s.lastWrite) && clicks==1,"empty composer gets just the transcript");
+
+        s=fixture(false,0); s.send.label="Queue message"; s.complete(); s.mKeyHandler.run();
+        check(clicks==1 && s.feedback.equals("Queued ✓"),"queue while the agent runs reports Queued");
+
+        // Chrome: no text search; editor inside a wrapper that has its own clear button,
+        // composer toolbar one level higher.
+        s=fixture(false,0); s.noTextSearch=true; s.send.label="Submit message";
+        AccessibilityNodeInfo column=s.root.kids.get(1);
+        AccessibilityNodeInfo wrap=new AccessibilityNodeInfo("editor wrap",24,428,376,452);
+        column.kids.remove(s.editor); wrap.kids.add(s.editor);
+        wrap.kids.add(new AccessibilityNodeInfo("Clear draft",360,428,376,452));
+        column.kids.add(0,wrap); assignOwner(s.root,s);
+        s.complete(); s.mKeyHandler.run();
+        check(writes==1 && clicks==1 && s.feedback.equals("Sent ✓"),"nested web toolbar found without text search: "+s.feedback);
+
+        // Busy T3 states are never clicked; the control is sent once it becomes Submit.
+        s=fixture(false,0); s.send.label="Preparing worktree"; final PaseoServiceHarness busy=s;
+        s.complete(); check(clicks==0,"busy label is not a submit control");
+        s.mKeyHandler.postDelayed(()->{busy.send.label="Submit message"; if(busy.mFlowComposer!=null) busy.observePaseoFlow();},1200);
+        s.mKeyHandler.run(); check(clicks==1,"sends when T3 is ready");
+
+        // Web echo differs in whitespace (trailing paragraph break) but is the same draft.
+        s=fixture(false,0); s.editor.text="existing draft\n"; s.complete(); s.mKeyHandler.run();
+        check(clicks==1 && "existing draft replacement".equals(s.lastWrite),"whitespace-normalized echo sends");
+
+        // Focus moved to a different input: never insert there.
+        s=fixture(false,0); AccessibilityNodeInfo other=new AccessibilityNodeInfo("Search",0,0,100,20);
+        other.editable=true; other.focused=true; s.editor.focused=false; s.root.kids.add(0,other); assignOwner(s.root,s);
+        s.complete(); s.mKeyHandler.run(); check(writes==0 && clicks==0,"another focused input cancels insertion");
     }
     static void staleCacheRegression() {
         PaseoServiceHarness s=fixture(false,0); s.staleCache=true; s.complete(); s.mKeyHandler.run();
@@ -354,7 +394,7 @@ public class PaseoServiceHarness {
         if(args[0].equals("timing")) { timingRegression(); return; }
         if(args[0].equals("stale-readiness")) { staleReadinessRegression(); return; }
         if(args[0].equals("stale-cache")) { staleCacheRegression(); return; }
-        if(args[0].equals("autosend")) { autosendRegressions(); return; }
+        if(args[0].equals("autosend")) { autosendRegressions(); webComposerRegressions(); return; }
         benchmark(args[0]); if(args[0].equals("after"))regressions();
     }
 }

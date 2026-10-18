@@ -216,10 +216,7 @@ public class VoiceVaultService extends Service {
             }
         }
 
-        // 2. Instant low-latency 35ms liquid pop (<3ms audio latency)
-        SoundEffects.playStartPop();
-
-        // 3. Dynamic top pill overlay with live ticking timer
+        // 2. Dynamic top pill overlay with live ticking timer
         FloatingPillOverlay.showRecording(this);
     }
 
@@ -236,10 +233,7 @@ public class VoiceVaultService extends Service {
             }
         }
 
-        // 2. Crisp 65ms dual-harmonic glass bell chime
-        SoundEffects.playSuccessChime();
-
-        // 3. Top pill displays green confirmation checkmark and auto-dismisses
+        // 2. Top pill displays green confirmation checkmark and auto-dismisses
         FloatingPillOverlay.showSuccess("✓ Copied");
     }
 
@@ -292,10 +286,10 @@ public class VoiceVaultService extends Service {
                 startForeground(NOTIFICATION_ID, notification);
             }
 
-            // Fire authoritative multi-modal feedback (Haptic + Sound + Visual Toast)
+            // Fire haptic + visual feedback (no sounds)
             playStrongStartFeedback();
 
-            // Delay microphone start 90ms so start chirp is never recorded into user audio
+            // Delay microphone start 90ms so the start haptic is never recorded into user audio
             mRecorderStartRunnable = () -> {
                 if (generation != mGeneration || !sIsRecording || mRecorder == null) return;
                 mRecorderStartRunnable = null;

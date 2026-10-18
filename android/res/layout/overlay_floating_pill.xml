@@ -40,4 +40,17 @@
         android:fontFamily="@font/urw_gothic_demi"
         android:letterSpacing="0.04" />
 
+    <!-- Auto-send state, shown whenever Dictation Mode is on (idle and recording). -->
+    <TextView
+        android:id="@+id/pill_send"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:paddingStart="8dp"
+        android:singleLine="true"
+        android:text="AUTO-SEND"
+        android:textColor="#4ADE80"
+        android:textSize="11sp"
+        android:fontFamily="@font/urw_gothic_demi"
+        android:letterSpacing="0.04" />
+
 </LinearLayout>

@@ -20,6 +20,9 @@ public class FloatingPillOverlay {
     private static final String TAG = "FloatingPillOverlay";
     private static final String PREFS_NAME = "voice_vault_prefs";
     private static final String PREF_DICTATION_MODE = "pref_dictation_mode_enabled";
+    private static final String PREF_AUTO_SEND = "pref_auto_send_on_paste";
+    static final String AUTO_SEND_ON = "AUTO-SEND";
+    static final String AUTO_SEND_OFF = "NO SEND";
     private static final Handler sMainHandler = new Handler(Looper.getMainLooper());
     private static final FloatingStatus sStatus = new FloatingStatus();
     private static Context sContext;
@@ -28,6 +31,7 @@ public class FloatingPillOverlay {
     private static View sDot;
     private static TextView sTvText;
     private static TextView sModeText;
+    private static TextView sSendText;
     private static final Runnable sRefresh = FloatingPillOverlay::render;
 
     /** Read the persisted mode, not a caller's potentially stale toggle value. */
@@ -90,6 +94,8 @@ public class FloatingPillOverlay {
         FloatingStatus.Snapshot status = sStatus.snapshot(now);
         boolean mode = sContext != null && sContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .getBoolean(PREF_DICTATION_MODE, false);
+        boolean autoSend = sContext != null && sContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(PREF_AUTO_SEND, true);
         if ((status.kind == FloatingStatus.Kind.IDLE && !mode) || sContext == null
                 || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(sContext))) {
             removeView();
@@ -105,6 +111,10 @@ public class FloatingPillOverlay {
             sPillView.setMinimumHeight(minHeight);
             sPillView.setMinimumWidth(idle ? 0 : Math.round(110 * sContext.getResources().getDisplayMetrics().density));
             sModeText.setVisibility(mode && idle ? View.VISIBLE : View.GONE);
+            // Always visible in Dictation Mode so Vol Down's outcome is never a surprise.
+            sSendText.setVisibility(mode && (idle || recording || processing) ? View.VISIBLE : View.GONE);
+            sSendText.setText(autoSend ? AUTO_SEND_ON : AUTO_SEND_OFF);
+            sSendText.setTextColor(Color.parseColor(autoSend ? "#4ADE80" : "#B4B4BC"));
             sTvText.setVisibility(idle ? View.GONE : View.VISIBLE);
             sTvText.setText(status.text);
             sTvText.setTextSize(recording ? 15f : 14f);
@@ -128,6 +138,7 @@ public class FloatingPillOverlay {
         sDot = sPillView.findViewById(R.id.pill_dot);
         sTvText = sPillView.findViewById(R.id.pill_text);
         sModeText = sPillView.findViewById(R.id.pill_mode);
+        sSendText = sPillView.findViewById(R.id.pill_send);
 
         int layoutFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -164,5 +175,6 @@ public class FloatingPillOverlay {
         sDot = null;
         sTvText = null;
         sModeText = null;
+        sSendText = null;
     }
 }
