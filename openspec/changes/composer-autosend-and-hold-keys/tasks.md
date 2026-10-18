@@ -16,5 +16,5 @@
 ## 3. Verification and delivery
 
 - [x] 3.1 Synthetic harness coverage (web composer, keys) and hermetic suite
-- [ ] 3.2 Signed APK published with unchanged certificate via the established PR path
+- [x] 3.2 Signed APK published with unchanged certificate via the established PR path
 - [ ] 3.3 Operator acceptance on device in T3 Code (operator-owned)
