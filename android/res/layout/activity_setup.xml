@@ -2,7 +2,7 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="@color/bg">
 
     <ScrollView
         android:layout_width="match_parent"
@@ -14,54 +14,48 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="20dp">
+            android:paddingStart="@dimen/space_xl"
+            android:paddingEnd="@dimen/space_xl"
+            android:paddingBottom="@dimen/space_xl">
 
-            <!-- Header -->
+            <!-- Top bar: title and close, as in the History drawer. -->
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="56dp"
                 android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingBottom="8dp">
+                android:gravity="center_vertical">
 
                 <TextView
+                    style="@style/VV.Title"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="SETUP &amp; DIAGNOSTICS"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp"
-                    android:textStyle="bold"
-                    android:fontFamily="@font/urw_gothic_demi"
-                    android:letterSpacing="0.08" />
+                    android:text="SETUP &amp; DIAGNOSTICS" />
 
-                <TextView
+                <ImageButton
                     android:id="@+id/btn_close_setup"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="✕"
-                    android:textColor="#888888"
-                    android:textSize="18sp"
-                    android:padding="6dp"
-                    android:clickable="true" />
+                    style="@style/VV.IconButton"
+                    android:layout_marginEnd="-14dp"
+                    android:src="@drawable/ic_close"
+                    android:contentDescription="Close setup"
+                    android:tooltipText="Close" />
             </LinearLayout>
 
             <TextView
+                style="@style/VV.Body"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Every APK update can silently reset Android system settings. Each card below shows its live status — tap the button to jump straight to the system screen that fixes it."
-                android:textColor="#777777"
+                android:textColor="@color/text_faint"
                 android:textSize="12sp"
-                android:fontFamily="@font/urw_gothic_book"
-                android:lineSpacingMultiplier="1.3"
-                android:layout_marginBottom="16dp" />
+                android:text="Every APK update can silently reset Android system settings. Each check below shows its live status and opens the screen that fixes it." />
 
-            <!-- Diagnostic cards are built programmatically by SetupActivity
-                 so each status pill can refresh live in onResume. -->
+            <!-- Diagnostic sections are built programmatically by SetupActivity
+                 so each status can refresh live in onResume. -->
             <LinearLayout
                 android:id="@+id/layout_setup_cards"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_s"
                 android:orientation="vertical" />
 
         </LinearLayout>

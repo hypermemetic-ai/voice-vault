@@ -13,7 +13,9 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -30,6 +32,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -64,6 +67,19 @@ public class MainActivity extends Activity {
     private View mBannerSetupWarning;
     private TextView mTvSetupWarning;
     private CheckBox mCheckboxAutoSend;
+    private TextView mTvConnectionStatus;
+    private TextView mTvDictationMode;
+    private TextView mTvRecordState;
+    private SharedPreferences mPrefs;
+    // Keeps the auto-send checkbox and Dictation Mode chip in step when the
+    // volume-key holds change them while the dashboard is open.
+    private final SharedPreferences.OnSharedPreferenceChangeListener mPrefsListener = (p, key) -> {
+        if ("pref_auto_send_on_paste".equals(key) && mCheckboxAutoSend != null) {
+            mCheckboxAutoSend.setChecked(p.getBoolean("pref_auto_send_on_paste", true));
+        } else if ("pref_dictation_mode_enabled".equals(key)) {
+            renderDictationModeChip();
+        }
+    };
     private boolean mTranscriptExpanded = false;
     private final ExecutorService mProfileExecutor = Executors.newSingleThreadExecutor();
 
@@ -170,6 +186,8 @@ public class MainActivity extends Activity {
         mBtnVoiceProfile = findViewById(R.id.btn_voice_profile);
         mBtnVoiceProfile.setOnClickListener(v ->
                 startActivity(new Intent(MainActivity.this, VoiceEnrollActivity.class)));
+        mBtnVoiceProfile.setText(rowLabel("Voice Gate", "Checking…"));
+        renderOverlayToggle();
 
         // Setup & Diagnostics Guide entry point (top bar) plus the critical
         // warning banner. Both offer 1-tap navigation to SetupActivity.
@@ -193,7 +211,18 @@ public class MainActivity extends Activity {
             mCheckboxAutoSend.setChecked(prefs.getBoolean("pref_auto_send_on_paste", true));
             mCheckboxAutoSend.setOnCheckedChangeListener((buttonView, isChecked) ->
                     prefs.edit().putBoolean("pref_auto_send_on_paste", isChecked).apply());
+            // The whole settings row is the touch target for the checkbox.
+            View autoSendRow = findViewById(R.id.row_auto_send);
+            if (autoSendRow != null) autoSendRow.setOnClickListener(v -> mCheckboxAutoSend.toggle());
         }
+
+        // Status chips and record-state label (display only).
+        mTvConnectionStatus = findViewById(R.id.tv_connection_status);
+        mTvDictationMode = findViewById(R.id.tv_dictation_mode);
+        mTvRecordState = findViewById(R.id.tv_record_state);
+        mPrefs = getSharedPreferences("voice_vault_prefs", MODE_PRIVATE);
+        mPrefs.registerOnSharedPreferenceChangeListener(mPrefsListener);
+        renderDictationModeChip();
 
         // Drawer views
         mBtnOpenHistory = findViewById(R.id.btn_open_history);
@@ -243,11 +272,11 @@ public class MainActivity extends Activity {
                 if (mFloatingActive) {
                     stopService(new Intent(this, FloatingBubbleService.class));
                     mFloatingActive = false;
-                    mBtnToggleOverlay.setTextColor(0xFF555555);
+                    renderOverlayToggle();
                 } else {
                     startService(new Intent(this, FloatingBubbleService.class));
                     mFloatingActive = true;
-                    mBtnToggleOverlay.setTextColor(0xFF22C55E);
+                    renderOverlayToggle();
                 }
             }
         });
@@ -290,12 +319,12 @@ public class MainActivity extends Activity {
 
     /**
      * Height budget for the expanded transcript. Everything else on screen is
-     * measured first — top bar, the record control (timer + 210dp button),
-     * bottom bar, screen padding and the transcript's own chrome — so the
-     * expanded transcript fits underneath the record button instead of
-     * squashing it. When no room is left at all (landscape/multi-window) the
-     * column simply scrolls, which is safe because the dashboard lives in a
-     * fillViewport ScrollView. Falls back to an estimate before first layout.
+     * measured first — app bar, the record control's content, the settings
+     * rows (bottom_bar), screen padding and the transcript's own chrome — so the expanded
+     * transcript fits underneath the record button instead of squashing it.
+     * When no room is left at all (landscape/multi-window) the column simply
+     * scrolls, which is safe because the dashboard lives in a fillViewport
+     * ScrollView. Falls back to an estimate before first layout.
      */
     private int computeExpandedTranscriptHeight() {
         float density = getResources().getDisplayMetrics().density;
@@ -306,23 +335,23 @@ public class MainActivity extends Activity {
 
         View topBar = findViewById(R.id.top_bar);
         View bottomBar = findViewById(R.id.bottom_bar);
+        ViewGroup recordCard = findViewById(R.id.record_card);
+        int recordContent = intrinsicHeight(recordCard);
         int reserved;
         if (topBar != null && topBar.getHeight() > 0
                 && bottomBar != null && bottomBar.getHeight() > 0
-                && mTvTimer != null && mTvTimer.getHeight() > 0
-                && mBtnRecord != null && mBtnRecord.getHeight() > 0
+                && recordContent > 0
                 && mLayoutTranscript != null && mLayoutTranscript.getHeight() > 0
                 && mSvTranscript != null) {
             int transcriptChrome = Math.max(0, mLayoutTranscript.getHeight() - mSvTranscript.getHeight())
                     + Math.round(16 * density); // transcript section bottom margin
             reserved = topBar.getHeight()
                     + bottomBar.getHeight()
-                    + mTvTimer.getHeight() + Math.round(32 * density) // timer bottom margin
-                    + mBtnRecord.getHeight()
-                    + Math.round(40 * density) // column vertical padding
+                    + recordContent
+                    + Math.round(16 * density) // column bottom padding
                     + transcriptChrome;
         } else {
-            reserved = Math.round((320 + 56 + 96 + 44 + 40) * density);
+            reserved = Math.round((56 + 360 + 168 + 64) * density);
         }
 
         int room = available - reserved;
@@ -331,6 +360,23 @@ public class MainActivity extends Activity {
         // transcript and let the outer ScrollView absorb the overflow.
         int cap = room > 0 ? room : Math.round(96 * density);
         return Math.min(cap, Math.round(available * 0.45f));
+    }
+
+    /** Height of a vertical group's visible children plus margins and padding (ignores spare weight space). */
+    private static int intrinsicHeight(ViewGroup group) {
+        if (group == null) return 0;
+        int total = group.getPaddingTop() + group.getPaddingBottom();
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child.getVisibility() == View.GONE) continue;
+            if (child.getHeight() <= 0) return 0;
+            total += child.getHeight();
+            if (child.getLayoutParams() instanceof ViewGroup.MarginLayoutParams) {
+                ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) child.getLayoutParams();
+                total += lp.topMargin + lp.bottomMargin;
+            }
+        }
+        return total;
     }
 
     /**
@@ -449,21 +495,20 @@ public class MainActivity extends Activity {
         if (mLayoutHistoryContainer == null) return;
         mLayoutHistoryContainer.removeAllViews();
 
+        float density = getResources().getDisplayMetrics().density;
+
         if (grouped == null || grouped.isEmpty()) {
             TextView emptyTv = new TextView(this);
             emptyTv.setText("No transcripts recorded yet");
-            emptyTv.setTextColor(Color.parseColor("#555555"));
+            emptyTv.setTextColor(color(R.color.text_faint));
             emptyTv.setTextSize(13f);
-            try {
-                emptyTv.setTypeface(getResources().getFont(R.font.urw_gothic_book));
-            } catch (Exception ignored) {}
-            emptyTv.setPadding(0, 40, 0, 0);
+            emptyTv.setTypeface(book());
+            emptyTv.setPadding(0, dp(24), 0, 0);
             mLayoutHistoryContainer.addView(emptyTv);
             return;
         }
 
         SimpleDateFormat timeFmt = new SimpleDateFormat("h:mm a", Locale.US);
-        float density = getResources().getDisplayMetrics().density;
 
         for (Map.Entry<String, List<HistoryManager.Entry>> group : grouped.entrySet()) {
             String headerText = group.getKey();
@@ -473,19 +518,24 @@ public class MainActivity extends Activity {
             // Date Section Header
             TextView tvHeader = new TextView(this);
             tvHeader.setText(headerText);
-            tvHeader.setTextColor(Color.parseColor("#777777"));
+            tvHeader.setAllCaps(true);
+            tvHeader.setTextColor(color(R.color.text_faint));
             tvHeader.setTextSize(11f);
-            tvHeader.setLetterSpacing(0.08f);
-            try {
-                tvHeader.setTypeface(getResources().getFont(R.font.urw_gothic_demi));
-            } catch (Exception ignored) {}
-            int padTop = Math.round(14 * density);
-            int padBottom = Math.round(6 * density);
-            tvHeader.setPadding(0, padTop, 0, padBottom);
+            tvHeader.setLetterSpacing(0.1f);
+            tvHeader.setTypeface(demi());
+            tvHeader.setPadding(0, dp(24), 0, dp(4));
             mLayoutHistoryContainer.addView(tvHeader);
 
-            // Item Cards
+            // Entries: plain text on the drawer background, hairlines between.
+            boolean first = true;
             for (HistoryManager.Entry entry : items) {
+                if (!first) {
+                    View rule = new View(this);
+                    rule.setBackgroundColor(color(R.color.divider));
+                    mLayoutHistoryContainer.addView(rule, new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, Math.max(1, dp(1))));
+                }
+                first = false;
                 View card = createTranscriptCard(entry, timeFmt, density);
                 mLayoutHistoryContainer.addView(card);
             }
@@ -495,94 +545,109 @@ public class MainActivity extends Activity {
     private View createTranscriptCard(HistoryManager.Entry entry, SimpleDateFormat timeFmt, float density) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackgroundResource(R.drawable.bg_history_card);
-        int pad = Math.round(12 * density);
-        card.setPadding(pad, pad, pad, pad);
+        card.setBackgroundResource(R.drawable.bg_row);
+        card.setPadding(0, dp(12), 0, dp(4));
         LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        cardLp.bottomMargin = Math.round(8 * density);
         card.setLayoutParams(cardLp);
         card.setClickable(true);
 
-        // Top Row: Time + Duration + Action
+        // Top Row: Time + Duration, with copy feedback on the right.
         LinearLayout topRow = new LinearLayout(this);
         topRow.setOrientation(LinearLayout.HORIZONTAL);
         topRow.setGravity(Gravity.CENTER_VERTICAL);
 
         String timeStr = timeFmt.format(new Date(entry.timestamp));
         TextView tvTime = new TextView(this);
-        tvTime.setText(timeStr);
-        tvTime.setTextColor(Color.parseColor("#999999"));
-        tvTime.setTextSize(11f);
-        try {
-            tvTime.setTypeface(getResources().getFont(R.font.urw_gothic_demi));
-        } catch (Exception ignored) {}
-        topRow.addView(tvTime);
-
-        if (entry.durationMs > 0) {
-            long sec = Math.round(entry.durationMs / 1000.0);
-            TextView tvDur = new TextView(this);
-            tvDur.setText(" · " + sec + "s");
-            tvDur.setTextColor(Color.parseColor("#22C55E"));
-            tvDur.setTextSize(11f);
-            try {
-                tvDur.setTypeface(getResources().getFont(R.font.urw_gothic_demi));
-            } catch (Exception ignored) {}
-            topRow.addView(tvDur);
-        }
-
-        View spacer = new View(this);
-        LinearLayout.LayoutParams spacerLp = new LinearLayout.LayoutParams(0, 1, 1f);
-        topRow.addView(spacer, spacerLp);
+        String meta = timeStr;
+        if (entry.durationMs > 0) meta += " · " + Math.round(entry.durationMs / 1000.0) + "s";
+        tvTime.setText(meta);
+        tvTime.setTextColor(color(R.color.text_muted));
+        tvTime.setTextSize(12f);
+        tvTime.setTypeface(demi());
+        topRow.addView(tvTime, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView tvCopyBadge = new TextView(this);
-        tvCopyBadge.setText(entry.transcript.isEmpty() ? "" : "COPY");
-        tvCopyBadge.setTextColor(Color.parseColor("#555555"));
-        tvCopyBadge.setTextSize(10f);
-        try {
-            tvCopyBadge.setTypeface(getResources().getFont(R.font.urw_gothic_demi));
-        } catch (Exception ignored) {}
+        tvCopyBadge.setTextColor(color(R.color.success));
+        tvCopyBadge.setTextSize(11f);
+        tvCopyBadge.setLetterSpacing(0.1f);
+        tvCopyBadge.setTypeface(demi());
         topRow.addView(tvCopyBadge);
 
         card.addView(topRow);
 
-        // Transcript Text
+        // Transcript text. A blank recording shows its outcome in its place.
+        boolean problem = entry.cleanupPending || entry.status.equals("failed") || entry.status.equals("interrupted");
         TextView tvTranscript = new TextView(this);
-        tvTranscript.setText(entry.transcript.isEmpty() ? HistoryManager.statusLabel(entry) : entry.transcript);
-        tvTranscript.setTextColor(Color.parseColor("#EEEEEE"));
-        tvTranscript.setTextSize(13.5f);
-        tvTranscript.setLineSpacing(0, 1.25f);
-        try {
-            tvTranscript.setTypeface(getResources().getFont(R.font.urw_gothic_book));
-        } catch (Exception ignored) {}
+        if (entry.transcript.isEmpty()) {
+            tvTranscript.setText(HistoryManager.statusLabel(entry));
+            tvTranscript.setTextColor(color(problem ? R.color.record : R.color.text_muted));
+        } else {
+            tvTranscript.setText(entry.transcript);
+            tvTranscript.setTextColor(color(R.color.text));
+            tvTranscript.setMaxLines(6);
+            tvTranscript.setEllipsize(TextUtils.TruncateAt.END);
+        }
+        tvTranscript.setTextSize(14f);
+        tvTranscript.setLineSpacing(0, 1.3f);
+        tvTranscript.setTypeface(book());
         LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        textLp.topMargin = Math.round(6 * density);
+        textLp.topMargin = dp(4);
         card.addView(tvTranscript, textLp);
 
-        TextView status=new TextView(this);status.setText(HistoryManager.statusLabel(entry)+(entry.audioAvailable ? "" : " · audio unavailable"));
-        status.setTextColor(Color.parseColor("#999999"));status.setTextSize(11);card.addView(status);
-        LinearLayout actions=new LinearLayout(this);actions.setOrientation(LinearLayout.VERTICAL);card.addView(actions);
+        // Status line only when it says something the text does not.
+        if (!entry.transcript.isEmpty() && (!entry.status.equals("transcribed") || !entry.audioAvailable || entry.cleanupPending)) {
+            TextView status=new TextView(this);
+            String label = entry.status.equals("transcribed") && !entry.cleanupPending ? "Audio unavailable" : HistoryManager.statusLabel(entry)+(entry.audioAvailable ? "" : " · audio unavailable");
+            status.setText(label);
+            status.setTextColor(color(problem ? R.color.record : R.color.text_faint));status.setTextSize(12);status.setTypeface(book());
+            LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            statusLp.topMargin = dp(4);
+            card.addView(status, statusLp);
+        }
+
+        // Recovery actions are short text buttons; routine actions are a
+        // compact icon row (labels via content description + tooltip).
+        LinearLayout actions=new LinearLayout(this);actions.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams actionsLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        actionsLp.topMargin = dp(4);
+        actionsLp.leftMargin = -dp(12);
+        card.addView(actions, actionsLp);
+        LinearLayout icons=new LinearLayout(this);icons.setOrientation(LinearLayout.HORIZONTAL);icons.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams iconsLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        iconsLp.leftMargin = -dp(14);
+        iconsLp.rightMargin = -dp(14);
+        card.addView(icons, iconsLp);
         boolean busy=entry.status.equals("recording") || entry.status.equals("processing");
-        addHistoryAction(actions,"Play original",entry.audioAvailable && !busy,()->retrieveAudio(entry,false));
-        addHistoryAction(actions,"Export original",entry.audioAvailable && !busy,()->retrieveAudio(entry,true));
+        addHistoryIcon(icons,R.drawable.ic_play,"Play original",entry.audioAvailable && !busy,()->retrieveAudio(entry,false));
+        addHistoryIcon(icons,R.drawable.ic_share,"Export original",entry.audioAvailable && !busy,()->retrieveAudio(entry,true));
         boolean resolved=entry.status.equals("transcribed") || entry.status.equals("no_speech") || entry.status.equals("speaker_rejected");
         if(!resolved && !entry.cleanupPending)addHistoryAction(actions,"Retry transcription",entry.audioAvailable && !busy && !VoiceVaultService.isRecording() && !VoiceVaultService.isProcessing(),()->{
             Intent recovery=new Intent(this,VoiceVaultService.class).setAction(VoiceVaultService.ACTION_RECOVER);
             recovery.putExtra(VoiceVaultService.EXTRA_RECORDING_ID,entry.localId);startService(recovery);
         });
         if(entry.localId.equals(VoiceVaultService.getRecoveryId()) && !entry.localId.isEmpty())addHistoryAction(actions,"Cancel transcription",true,()->startService(new Intent(this,VoiceVaultService.class).setAction(VoiceVaultService.ACTION_CANCEL)));
-        if(!entry.transcript.isEmpty())addHistoryAction(actions,"Copy",true,card::performClick);
-        addHistoryAction(actions,entry.cleanupPending ? "Retry deletion" : "Delete",!busy,()->new AlertDialog.Builder(this)
+        if(!entry.transcript.isEmpty())addHistoryIcon(icons,R.drawable.ic_copy,"Copy",true,card::performClick);
+        Runnable confirmDelete=()->new AlertDialog.Builder(this)
             .setTitle("Delete this recording?").setMessage("Remove its saved audio and History entry. Export first if you want a copy.")
             .setNegativeButton("Keep",null).setPositiveButton("Delete",(dialog,which)->{
                 stopHistoryPlayback();mProfileExecutor.execute(()->{boolean complete=HistoryManager.delete(this,entry);
                     mHandler.post(()->{Toast.makeText(this,complete ? "Recording deleted" : "Deletion incomplete — retry from History",Toast.LENGTH_LONG).show();loadHistoryIntoDrawer();});});
-            }).show());
+            }).show();
+        if(entry.cleanupPending)addHistoryAction(actions,"Retry deletion",!busy,confirmDelete);
+        else {
+            icons.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+            addHistoryIcon(icons,R.drawable.ic_delete,"Delete",!busy,confirmDelete);
+        }
+        if(actions.getChildCount()==0)actions.setVisibility(View.GONE);
 
         // A tap on a transcript is an explicit copy action; blank recordings never copy.
         card.setOnClickListener(v -> {
@@ -606,12 +671,8 @@ public class MainActivity extends Activity {
                     vib.vibrate(50);
                 }
             }
-            tvCopyBadge.setText("✓ COPIED");
-            tvCopyBadge.setTextColor(Color.parseColor("#22C55E"));
-            mHandler.postDelayed(() -> {
-                tvCopyBadge.setText("COPY");
-                tvCopyBadge.setTextColor(Color.parseColor("#555555"));
-            }, 1500);
+            tvCopyBadge.setText("COPIED");
+            mHandler.postDelayed(() -> tvCopyBadge.setText(""), 1500);
 
             // Also populate the main screen transcript editor
             if (mEtTranscript != null && mLayoutTranscript != null) {
@@ -624,9 +685,26 @@ public class MainActivity extends Activity {
         return card;
     }
 
+    /** Text-only recovery action (retry / cancel / retry deletion), 48dp tall. */
     private void addHistoryAction(LinearLayout row,String title,boolean enabled,Runnable action) {
-        Button button=new Button(this);button.setText(title);button.setEnabled(enabled);button.setOnClickListener(v->action.run());row.addView(button);
+        Button button=new Button(this);button.setText(title);button.setEnabled(enabled);button.setOnClickListener(v->action.run());
+        boolean destructive=title.equals("Retry deletion");
+        button.setBackgroundResource(R.drawable.bg_row);
+        button.setTextColor(destructive ? ColorStateList.valueOf(color(R.color.record)) : getColorStateList(R.color.btn_text));
+        button.setStateListAnimator(null);button.setAllCaps(true);button.setTextSize(12f);button.setLetterSpacing(0.06f);button.setTypeface(demi());
+        button.setMinHeight(dp(48));button.setMinimumHeight(dp(48));button.setMinWidth(0);button.setMinimumWidth(0);
+        button.setPadding(dp(12),0,dp(12),0);
+        row.addView(button,new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,LinearLayout.LayoutParams.WRAP_CONTENT));
     }
+
+    /** 48dp icon action; the label is its content description and tooltip. */
+    private void addHistoryIcon(LinearLayout row,int icon,String title,boolean enabled,Runnable action) {
+        ImageButton button=new ImageButton(this);button.setImageResource(icon);button.setContentDescription(title);button.setTooltipText(title);
+        button.setBackgroundResource(R.drawable.bg_icon_button);button.setScaleType(ImageView.ScaleType.CENTER);
+        button.setImageTintList(getColorStateList(R.color.icon_tint));button.setEnabled(enabled);button.setOnClickListener(v->action.run());
+        row.addView(button,new LinearLayout.LayoutParams(dp(48),dp(48)));
+    }
+
     private void retrieveAudio(HistoryManager.Entry entry,boolean export) {
         stopHistoryPlayback();final int generation=mAudioGeneration;
         mProfileExecutor.execute(()->{
@@ -717,6 +795,7 @@ public class MainActivity extends Activity {
         } else {
             renderIdleState();
             mPbGpuSpinner.setVisibility(View.VISIBLE);
+            renderRecordStateLabel(false, true);
             intent.setAction(VoiceVaultService.ACTION_STOP);
         }
 
@@ -742,21 +821,102 @@ public class MainActivity extends Activity {
         } else {
             renderIdleState();
         }
+        renderRecordStateLabel(recording, processing);
     }
 
     private void renderRecordingState() {
-        mBtnRecord.setBackgroundResource(R.drawable.bg_btn_red);
-        mBtnRecord.setImageResource(R.drawable.ic_btn_stop_symbol);
+        mBtnRecord.setBackgroundResource(R.drawable.bg_record_active);
+        mBtnRecord.setImageResource(R.drawable.ic_record_stop);
+        renderRecordStateLabel(true, false);
 
         startTimerUpdater();
     }
 
     private void renderIdleState() {
-        mBtnRecord.setBackgroundResource(R.drawable.bg_btn_idle);
-        mBtnRecord.setImageResource(R.drawable.ic_btn_record_symbol);
+        mBtnRecord.setBackgroundResource(R.drawable.bg_record_idle);
+        mBtnRecord.setImageResource(R.drawable.ic_record_core);
+        renderRecordStateLabel(false, VoiceVaultService.isProcessing());
 
         stopTimerUpdater();
         mTvTimer.setText("00:00");
+    }
+
+    /** Record state label: Ready / Recording / Transcribing, colour only for recording. */
+    private void renderRecordStateLabel(boolean recording, boolean processing) {
+        if (mTvRecordState == null) return;
+        if (recording) {
+            mTvRecordState.setText("Recording");
+            mTvRecordState.setTextColor(color(R.color.record));
+        } else if (processing) {
+            mTvRecordState.setText("Transcribing");
+            mTvRecordState.setTextColor(color(R.color.text_muted));
+        } else {
+            mTvRecordState.setText("Ready");
+            mTvRecordState.setTextColor(color(R.color.text_faint));
+        }
+        if (mTvTimer != null) mTvTimer.setTextColor(color(recording ? R.color.text : R.color.text_muted));
+    }
+
+    private void renderDictationModeChip() {
+        if (mTvDictationMode == null || mPrefs == null) return;
+        boolean on = mPrefs.getBoolean("pref_dictation_mode_enabled", false);
+        mTvDictationMode.setText(on ? "Dictation Mode on" : "Dictation Mode off");
+        mTvDictationMode.setTextColor(color(on ? R.color.text : R.color.text_muted));
+        mTvDictationMode.setCompoundDrawableTintList(ColorStateList.valueOf(color(on ? R.color.success : R.color.text_faint)));
+    }
+
+    private void renderConnectionChip(boolean reachable) {
+        if (mTvConnectionStatus == null) return;
+        mTvConnectionStatus.setText(reachable ? "Server connected" : "Server offline");
+        mTvConnectionStatus.setTextColor(color(reachable ? R.color.text : R.color.text_muted));
+        mTvConnectionStatus.setCompoundDrawableTintList(ColorStateList.valueOf(color(reachable ? R.color.success : R.color.text_faint)));
+    }
+
+    private void renderOverlayToggle() {
+        if (mBtnToggleOverlay == null) return;
+        mBtnToggleOverlay.setText(rowLabel("Floating bubble", mFloatingActive ? "On" : "Off"));
+    }
+
+    /** Two-line settings row label: title plus a smaller, fainter detail line. */
+    private CharSequence rowLabel(String title, String detail) {
+        android.text.SpannableStringBuilder sb = new android.text.SpannableStringBuilder(title);
+        sb.append('\n');
+        int start = sb.length();
+        sb.append(detail);
+        sb.setSpan(new android.text.style.RelativeSizeSpan(0.86f), start, sb.length(), 0);
+        sb.setSpan(new android.text.style.ForegroundColorSpan(color(R.color.text_faint)), start, sb.length(), 0);
+        return sb;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private int color(int res) {
+        return getColor(res);
+    }
+
+    private Typeface mDemi;
+    private Typeface mBook;
+    private Typeface demi() {
+        if (mDemi == null) {
+            try {
+                mDemi = getResources().getFont(R.font.urw_gothic_demi);
+            } catch (Exception ignored) {
+                mDemi = Typeface.DEFAULT_BOLD;
+            }
+        }
+        return mDemi;
+    }
+    private Typeface book() {
+        if (mBook == null) {
+            try {
+                mBook = getResources().getFont(R.font.urw_gothic_book);
+            } catch (Exception ignored) {
+                mBook = Typeface.DEFAULT;
+            }
+        }
+        return mBook;
     }
 
     private void startTimerUpdater() {
@@ -794,6 +954,7 @@ public class MainActivity extends Activity {
         }
         syncWithServiceState();
         FloatingPillOverlay.refreshMode(this);
+        renderDictationModeChip();
         refreshSetupBanner();
         refreshVoiceProfileStatus();
     }
@@ -823,32 +984,38 @@ public class MainActivity extends Activity {
             if (reason.length() > 0) reason.append(" · ");
             reason.append("Mic denied");
         }
-        mTvSetupWarning.setText("⚠ Dictation keys unavailable — " + reason + ". Tap to fix.");
+        mTvSetupWarning.setText("Dictation keys unavailable — " + reason + ". Tap to fix.");
         mBannerSetupWarning.setVisibility(View.VISIBLE);
     }
 
     /**
      * Show the live enrollment state of the server voiceprint gate on the
-     * dashboard ("Voice Gate: ON · 3 clips" / "OFF · Tap to enroll").
+     * dashboard ("On · 3 clips" / "Off · tap to enroll").
      */
     private void refreshVoiceProfileStatus() {
         if (mBtnVoiceProfile == null) return;
         mProfileExecutor.execute(() -> {
             String label;
+            boolean reachable;
             try {
                 JSONObject status = VoiceVaultApi.request(VoiceVaultApi.PROFILE_STATUS_URL, "GET");
+                reachable = true;
                 if (status.optBoolean("enrolled", false)) {
-                    label = String.format(Locale.US, "🎙 Voice Gate: ON · %d clips · θ %.2f",
+                    label = String.format(Locale.US, "On · %d clips · θ %.2f",
                             status.optInt("sampleCount", 0), status.optDouble("threshold", 0));
                 } else {
-                    label = "🎙 Voice Gate: OFF · Tap to enroll";
+                    label = "Off · tap to enroll";
                 }
             } catch (Exception e) {
-                label = "🎙 Voice Gate: unavailable";
+                reachable = false;
+                label = "Unavailable while offline";
             }
             final String text = label;
+            final boolean online = reachable;
             mHandler.post(() -> {
-                if (mBtnVoiceProfile != null) mBtnVoiceProfile.setText(text);
+                if (mBtnVoiceProfile != null) mBtnVoiceProfile.setText(rowLabel("Voice Gate", text));
+                // The profile status call doubles as the server reachability probe.
+                renderConnectionChip(online);
             });
         });
     }
@@ -866,6 +1033,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         stopHistoryPlayback();
+        if (mPrefs != null) mPrefs.unregisterOnSharedPreferenceChangeListener(mPrefsListener);
         super.onDestroy();
         mProfileExecutor.shutdownNow();
         stopTimerUpdater();

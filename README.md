@@ -128,7 +128,7 @@ The web dashboard has a **VOICE** chip in the top bar that opens the enrollment
 modal: record three clips with a live level meter, submit, and see the resulting
 model, `μ`, `σ` and threshold. "Test my voice" scores a fresh clip against the
 gallery, and "Remove profile" disables the gate. The Android dashboard shows the
-same state (`🎙 Voice Gate: ON · 3 clips · θ 0.74`) and opens the native
+same state on its Voice Gate row (`On · 3 clips · θ 0.74`) and opens the native
 enrollment screen.
 
 ---
@@ -248,7 +248,7 @@ The signed release APK will be generated at `android/build/VoiceVault.apk` and c
 4. Turn Quick Tap **ON**.
 5. Select **Open app** and choose **Voice Vault** (or **Voice Vault (Quick Toggle)**).
 6. Double-tap the back of your phone to start recording; double-tap again to transcribe and copy to clipboard.
-7. Enroll your voice from the dashboard (`🎙 Voice Gate` → record 3 clips) or from the web UI.
+7. Enroll your voice from the dashboard (Voice Gate row → record 3 clips) or from the web UI.
 
 ---
 

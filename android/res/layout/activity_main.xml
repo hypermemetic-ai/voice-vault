@@ -2,7 +2,7 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="@color/bg">
 
     <!-- Main Dashboard Screen.
          fillViewport + wrap_content column keeps the dashboard centered and
@@ -19,191 +19,187 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="20dp">
+            android:paddingStart="@dimen/space_xl"
+            android:paddingEnd="@dimen/space_xl"
+            android:paddingBottom="@dimen/space_l">
 
-        <!-- Top Bar with History Toggle, GPU Indicator & Processing Spinner -->
+        <!-- Top bar: History, title, Setup. Icon glyphs sit on the content edge. -->
         <LinearLayout
             android:id="@+id/top_bar"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="56dp"
             android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingBottom="16dp">
+            android:gravity="center_vertical">
 
-            <TextView
+            <ImageButton
                 android:id="@+id/btn_open_history"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="☰"
-                android:textColor="#FFFFFF"
-                android:textSize="22sp"
-                android:paddingEnd="14dp"
-                android:clickable="true" />
+                style="@style/VV.IconButton"
+                android:layout_marginStart="-14dp"
+                android:src="@drawable/ic_history"
+                android:contentDescription="History"
+                android:tooltipText="History" />
 
             <TextView
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="VOICE VAULT"
-                android:textColor="#777777"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:fontFamily="@font/urw_gothic_demi"
-                android:letterSpacing="0.1" />
+                android:layout_marginStart="@dimen/space_xs"
+                style="@style/VV.Title"
+                android:textColor="@color/text_muted"
+                android:text="Voice Vault" />
 
-            <ProgressBar
-                android:id="@+id/pb_gpu_spinner"
-                android:layout_width="16dp"
-                android:layout_height="16dp"
-                android:layout_marginEnd="6dp"
-                android:indeterminate="true"
-                android:visibility="gone" />
-
-            <TextView
-                android:id="@+id/tv_connection_status"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="RTX A2000"
-                android:textColor="#22C55E"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:fontFamily="@font/urw_gothic_demi" />
-
-            <TextView
+            <ImageButton
                 android:id="@+id/btn_open_setup"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="⚙ SETUP"
-                android:textColor="#AAAAAA"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:fontFamily="@font/urw_gothic_demi"
-                android:paddingStart="12dp"
-                android:clickable="true" />
+                style="@style/VV.IconButton"
+                android:layout_marginEnd="-14dp"
+                android:src="@drawable/ic_tune"
+                android:contentDescription="Setup and diagnostics"
+                android:tooltipText="Setup" />
         </LinearLayout>
 
-        <!-- Setup warning banner: visible when Accessibility or Mic is broken.
-             1-tap navigation into the Setup & Diagnostics Guide. -->
+        <!-- Setup warning: plain red line, the whole row opens Setup. -->
         <LinearLayout
             android:id="@+id/banner_setup_warning"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:minHeight="@dimen/touch_target"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:background="#1A0A0A"
-            android:padding="10dp"
-            android:layout_marginBottom="8dp"
+            android:background="@drawable/bg_row"
             android:visibility="gone"
-            android:clickable="true">
+            android:clickable="true"
+            android:focusable="true">
 
             <TextView
                 android:id="@+id/tv_setup_warning"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:textColor="#EF4444"
-                android:textSize="12sp"
-                android:fontFamily="@font/urw_gothic_demi" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="FIX →"
-                android:textColor="#EF4444"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:fontFamily="@font/urw_gothic_demi"
-                android:paddingStart="8dp" />
+                android:textColor="@color/record"
+                android:textSize="13sp"
+                android:lineSpacingMultiplier="1.2"
+                android:fontFamily="@font/urw_gothic_book" />
         </LinearLayout>
 
-        <!-- Center Dictation Control: Centered and Balanced.
-             wrap_content + weight lets the ScrollView give it every spare pixel
-             in portrait; minHeight keeps the timer + 210dp record button intact
-             when space runs out (the page scrolls instead of clipping). -->
+        <!-- Record control: state, timer, button, then connection / mode.
+             The weight gives it every spare pixel in portrait; minHeight keeps
+             it intact when space runs out (the page scrolls instead). -->
         <LinearLayout
+            android:id="@+id/record_card"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:minHeight="250dp"
+            android:minHeight="300dp"
             android:gravity="center"
-            android:orientation="vertical">
+            android:orientation="vertical"
+            android:paddingTop="@dimen/space_l"
+            android:paddingBottom="@dimen/space_l">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="16dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <ProgressBar
+                    android:id="@+id/pb_gpu_spinner"
+                    android:layout_width="12dp"
+                    android:layout_height="12dp"
+                    android:layout_marginEnd="@dimen/space_s"
+                    android:indeterminate="true"
+                    android:indeterminateTint="@color/text_muted"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/tv_record_state"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    style="@style/VV.Label"
+                    android:text="Ready" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/tv_timer"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_s"
+                android:layout_marginBottom="@dimen/space_xl"
+                android:includeFontPadding="false"
                 android:text="00:00"
-                android:textColor="#FFFFFF"
-                android:textSize="58sp"
-                android:textStyle="bold"
-                android:fontFamily="@font/urw_gothic_demi"
-                android:layout_marginBottom="32dp" />
+                android:textColor="@color/text_muted"
+                android:textSize="56sp"
+                android:fontFamily="@font/urw_gothic_demi" />
 
-            <!-- Massive Symbol Button with Big Shapes -->
             <ImageButton
                 android:id="@+id/btn_record"
-                android:layout_width="210dp"
-                android:layout_height="210dp"
-                android:background="@drawable/bg_btn_idle"
-                android:src="@drawable/ic_btn_record_symbol"
-                android:scaleType="centerInside"
+                android:layout_width="@dimen/record_button"
+                android:layout_height="@dimen/record_button"
+                android:background="@drawable/bg_record_idle"
+                android:src="@drawable/ic_record_core"
+                android:scaleType="center"
                 android:contentDescription="Record or Stop" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_xl"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:id="@+id/tv_connection_status"
+                    style="@style/VV.Status"
+                    android:text="Checking server" />
+
+                <TextView
+                    android:id="@+id/tv_dictation_mode"
+                    style="@style/VV.Status"
+                    android:layout_marginStart="@dimen/space_xl"
+                    android:text="Dictation Mode off" />
+            </LinearLayout>
         </LinearLayout>
 
-        <!-- Result / Transcript Section -->
+        <!-- Latest transcript -->
         <LinearLayout
             android:id="@+id/layout_transcript"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:background="#080808"
-            android:padding="16dp"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="@dimen/space_l"
             android:visibility="gone">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:layout_marginBottom="8dp">
+                android:gravity="center_vertical">
 
                 <TextView
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="COPIED TO CLIPBOARD"
-                    android:textColor="#22C55E"
-                    android:textSize="11sp"
-                    android:textStyle="bold"
-                    android:fontFamily="@font/urw_gothic_demi"
-                    android:letterSpacing="0.06" />
+                    style="@style/VV.Label"
+                    android:text="Latest transcript" />
 
                 <Button
                     android:id="@+id/btn_expand"
                     android:layout_width="wrap_content"
-                    android:layout_height="32dp"
-                    android:layout_marginEnd="8dp"
-                    android:background="#1C1C1C"
-                    android:text="EXPAND"
-                    android:textColor="#FFFFFF"
-                    android:textSize="11sp"
-                    android:fontFamily="@font/urw_gothic_demi" />
+                    android:layout_height="wrap_content"
+                    style="@style/VV.Button.Text"
+                    android:text="Expand" />
 
                 <Button
                     android:id="@+id/btn_copy"
                     android:layout_width="wrap_content"
-                    android:layout_height="32dp"
-                    android:background="#1C1C1C"
-                    android:text="COPY"
-                    android:textColor="#FFFFFF"
-                    android:textSize="11sp"
-                    android:fontFamily="@font/urw_gothic_demi" />
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="-12dp"
+                    style="@style/VV.Button.Text"
+                    android:text="Copy" />
             </LinearLayout>
 
-            <!-- Compact by default (3 lines, ellipsized). Expanding gives the
-                 ScrollView a bounded height so the transcript scrolls inside it
-                 instead of pushing the record button off-screen. -->
+            <!-- Compact by default (3 lines). Expanding gives the ScrollView a
+                 bounded height so the transcript scrolls inside it instead of
+                 pushing the record button off-screen. -->
             <ScrollView
                 android:id="@+id/sv_transcript"
                 android:layout_width="match_parent"
@@ -217,7 +213,8 @@
                     android:layout_height="wrap_content"
                     android:maxLines="3"
                     android:ellipsize="end"
-                    android:textColor="#FFFFFF"
+                    android:padding="0dp"
+                    android:textColor="@color/text"
                     android:textSize="15sp"
                     android:fontFamily="@font/urw_gothic_book"
                     android:background="@null"
@@ -231,52 +228,67 @@
             </ScrollView>
         </LinearLayout>
 
-        <!-- Hardware & Gesture Quick Guide Bar -->
+        <!-- Settings: three plain rows, no surfaces. -->
         <LinearLayout
             android:id="@+id/bottom_bar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center"
-            android:paddingTop="8dp">
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:id="@+id/row_auto_send"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_row"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Auto-send"
+                        android:textColor="@color/text"
+                        android:textSize="14sp"
+                        android:fontFamily="@font/urw_gothic_book" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Sends after Vol Down inserts the text"
+                        android:textColor="@color/text_faint"
+                        android:textSize="12sp"
+                        android:fontFamily="@font/urw_gothic_book" />
+                </LinearLayout>
+
+                <CheckBox
+                    android:id="@+id/checkbox_auto_send"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="-6dp"
+                    android:buttonTint="@color/text"
+                    android:contentDescription="Auto-send" />
+            </LinearLayout>
 
             <Button
                 android:id="@+id/btn_voice_profile"
-                android:layout_width="wrap_content"
-                android:layout_height="32dp"
-                android:background="@null"
-                android:text="🎙 Voice Gate: …"
-                android:textColor="#555555"
-                android:textSize="11sp"
-                android:fontFamily="@font/urw_gothic_book" />
+                style="@style/VV.Row"
+                android:minHeight="56dp"
+                android:text="Voice Gate" />
 
             <Button
                 android:id="@+id/btn_toggle_overlay"
-                android:layout_width="wrap_content"
-                android:layout_height="32dp"
-                android:background="@null"
-                android:text="⊚ Floating Bubble"
-                android:textColor="#555555"
-                android:textSize="11sp"
-                android:fontFamily="@font/urw_gothic_book" />
-        </LinearLayout>
-
-        <!-- Dictation Settings: Volume-Key Mode -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center"
-            android:paddingTop="4dp">
-
-            <CheckBox
-                android:id="@+id/checkbox_auto_send"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Auto-send on paste (Vol Dn)"
-                android:textColor="#AAAAAA"
-                android:textSize="12sp"
-                android:fontFamily="@font/urw_gothic_book" />
+                style="@style/VV.Row"
+                android:minHeight="56dp"
+                android:text="Floating bubble" />
         </LinearLayout>
 
         </LinearLayout>
@@ -298,49 +310,43 @@
         android:layout_height="match_parent"
         android:layout_gravity="start"
         android:orientation="vertical"
-        android:background="#0A0A0A"
-        android:elevation="24dp"
-        android:padding="20dp"
-        android:visibility="gone">
+        android:background="@color/surface"
+        android:paddingStart="@dimen/space_xl"
+        android:paddingEnd="@dimen/space_xl"
+        android:visibility="gone"
+        android:clickable="true">
 
         <!-- Drawer Header -->
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="56dp"
             android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingBottom="12dp">
+            android:gravity="center_vertical">
 
             <TextView
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="TRANSCRIPTS"
-                android:textColor="#FFFFFF"
-                android:textSize="15sp"
-                android:fontFamily="@font/urw_gothic_demi"
-                android:letterSpacing="0.08" />
+                style="@style/VV.Title"
+                android:text="History" />
 
-            <TextView
+            <ImageButton
                 android:id="@+id/btn_close_drawer"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="✕"
-                android:textColor="#888888"
-                android:textSize="18sp"
-                android:padding="6dp"
-                android:clickable="true" />
+                style="@style/VV.IconButton"
+                android:layout_marginEnd="-14dp"
+                android:src="@drawable/ic_close"
+                android:contentDescription="Close history"
+                android:tooltipText="Close" />
         </LinearLayout>
 
         <TextView
             android:id="@+id/tv_history_subtitle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Last 50 Transcriptions · Tap to copy"
-            android:textColor="#666666"
-            android:textSize="11sp"
-            android:fontFamily="@font/urw_gothic_book"
-            android:layout_marginBottom="16dp" />
+            android:text="Last 50 transcriptions · tap one to copy"
+            android:textColor="@color/text_faint"
+            android:textSize="12sp"
+            android:fontFamily="@font/urw_gothic_book" />
 
         <!-- History Items ScrollView -->
         <ScrollView
@@ -353,7 +359,8 @@
                 android:id="@+id/layout_history_container"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical" />
+                android:orientation="vertical"
+                android:paddingBottom="@dimen/space_xl" />
         </ScrollView>
     </LinearLayout>
 
