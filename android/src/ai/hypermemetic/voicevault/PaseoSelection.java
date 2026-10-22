@@ -43,7 +43,11 @@ final class PaseoSelection {
                 || "Send and interrupt".equals(label) || "Send and steer".equals(label)
                 // T3 Code composer (aria-label of its submit control by mode).
                 || "Submit message".equals(label) || "Steer message".equals(label)
-                || "Compact and send".equals(label) || "Update queued message".equals(label);
+                || "Compact and send".equals(label) || "Update queued message".equals(label)
+                // T3 Code 2.0 Android composer: the label follows the agent's state
+                // (idle Send/Queue, running Steer/Queue/Restart, new thread Start/Queue task).
+                || "Steer".equals(label) || "Restart".equals(label)
+                || "Start task".equals(label) || "Queue task".equals(label);
     }
     static final class Node {
         String label, text;

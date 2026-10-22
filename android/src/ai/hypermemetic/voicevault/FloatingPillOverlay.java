@@ -73,6 +73,7 @@ public class FloatingPillOverlay {
 
     /** Temporarily replaces the text in the existing brick, including while idle. */
     public static void showFeedback(Context context, String message, boolean enabled) {
+        android.util.Log.i("VoiceVaultPill", message);
         sMainHandler.post(() -> {
             sContext = context.getApplicationContext();
             sStatus.feedback(message, enabled, SystemClock.uptimeMillis());

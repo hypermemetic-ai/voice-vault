@@ -527,7 +527,7 @@ public class VoiceVaultKeyService extends AccessibilityService {
                 PaseoSelection.Node scope = describe(parent);
                 scope.scoped = true;
                 scope.children.add(describe(composer));
-                for (String query : new String[] {"Send", "Queue", "Submit", "Steer"}) {
+                for (String query : new String[] {"Send", "Queue", "Submit", "Steer", "Restart", "Start task"}) {
                     java.util.List<AccessibilityNodeInfo> results = parent.findAccessibilityNodeInfosByText(query);
                     if (results == null) continue;
                     for (AccessibilityNodeInfo result : results) {

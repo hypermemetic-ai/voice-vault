@@ -157,6 +157,13 @@ public class PaseoHarness {
         // T3 Code's composer submit names by mode; never its other buttons.
         for (String label : new String[] {"Submit message", "Steer message", "Queue message", "Compact and send", "Update queued message"})
             check(PaseoSelection.primary(label));
+        // T3 Code 2.0 Android composer names by agent state (idle, running, new thread).
+        for (String label : new String[] {"Send", "Queue", "Steer", "Restart", "Start task", "Queue task"})
+            check(PaseoSelection.primary(label));
+        for (String label : new String[] {"Stop agent", "Resume queue", "Choose how to send this message", "Add attachment",
+                "Steered the active turn", "Steer now", "Restart turn", "Saving…", "Attaching pasted text", "Starting task",
+                "Cancel dictation", "Finish dictation", "Edit pending message"})
+            check(!PaseoSelection.primary(label));
         for (String label : new String[] {"Stop generation", "Submitting message", "Connecting", "Preparing worktree",
                 "Resume thread", "Open sending thread", "Edit queued message", "Remove queued message"})
             check(!PaseoSelection.primary(label));
