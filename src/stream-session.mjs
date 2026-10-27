@@ -82,6 +82,9 @@ export function createStreamSession({
     const stat = files.lstatSync(file);
     if (stat.isFile() && !stat.isSymbolicLink()) received = stat.size;
   } catch {}
+  // Only a file adopted from an earlier process needs replaying into the
+  // cutter; a new session's own appends are already pushed as they arrive.
+  replayed = received === 0;
 
   /** Load an adopted file into the cutter once, discarding old pieces. */
   function replay() {

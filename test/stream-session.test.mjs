@@ -121,6 +121,43 @@ test("finalized pieces are transcribed in the background, one at a time, and cac
   }
 });
 
+/** Irregular bursts and pauses: no two stretches repeat, unlike a flat tone. */
+function irregularSpeech(durationSeconds) {
+  const samples = new Int16Array(durationSeconds * SR);
+  let seed = 7;
+  const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  let index = 0;
+  while (index < samples.length) {
+    const burst = Math.round((1 + random() * 4) * SR);
+    for (let i = 0; i < burst && index < samples.length; i += 1, index += 1) {
+      samples[index] = Math.round((random() * 2 - 1) * 5000 * (0.6 + 0.4 * Math.sin(index / 900)));
+    }
+    index += Math.round((0.25 + random() * 0.6) * SR);
+  }
+  return samples;
+}
+
+test("pieces cut from small streamed appends match the final recording's pieces", async () => {
+  const dir = sessionDir("small-appends");
+  const full = irregularSpeech(130);
+  const session = createStreamSession({
+    id: "appends",
+    dir,
+    transcribe: async (wavPath, reqId) => ({ text: reqId, backend: "stub" }),
+  });
+  const step = 3 * SR;
+  for (let offset = 0; offset < full.length; offset += step) {
+    session.append(offset * 2, bytesOf(full.subarray(offset, Math.min(full.length, offset + step))));
+  }
+  await session.whenIdle();
+
+  const pieces = cutPieces(full, resolvePieceOptions({ sampleRate: SR }));
+  const expected = pieces.slice(0, session.cache.size)
+    .map((piece) => pieceCacheKey(piece.startSample, piece.endSample, full.subarray(piece.startSample, piece.endSample)));
+  assert.ok(session.cache.size >= 2, `only ${session.cache.size} pieces finalized`);
+  assert.deepEqual([...session.cache.keys()], expected);
+});
+
 test("a failed piece is not cached and later pieces still run", async () => {
   const dir = sessionDir("failure");
   const full = flatTone(100);
