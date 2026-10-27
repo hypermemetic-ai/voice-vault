@@ -12,7 +12,7 @@ before(()=>{
  const source=path.join(root,'android/src/ai/hypermemetic/voicevault');
  const javaFiles=[];const walk=dir=>{for(const f of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,f.name);if(f.isDirectory())walk(p);else if(p.endsWith('.java'))javaFiles.push(p);}};
  walk(path.join(root,'test/fixtures/recovery'));
- const result=spawnSync('javac',['--release','11','-d',classes,...['RecordingIndex','RecordingStore','HistoryManager','DictationUpload','RecoveryTranscription','RecordingAudio','RecordingAudioProvider'].map(n=>path.join(source,n+'.java')),...javaFiles],{encoding:'utf8'});
+ const result=spawnSync('javac',['--release','11','-d',classes,...['RecordingIndex','RecordingStore','WavHeader','HistoryManager','DictationUpload','RecoveryTranscription','RecordingAudio','RecordingAudioProvider'].map(n=>path.join(source,n+'.java')),...javaFiles],{encoding:'utf8'});
  assert.equal(result.status,0,result.stderr || result.error?.message);
 });
 after(()=>{if(classes)fs.rmSync(classes,{recursive:true,force:true});});
