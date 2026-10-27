@@ -431,7 +431,7 @@ export function createAppServer(options = {}) {
         rejected: Boolean(result.rejected), durationMs: claimed.duration_ms,
         audioSentMs: result.audioSentMs, transcribeMs: result.transcribeMs,
         audioUrl: `/api/audio/${claimed.id}`, backend: result.backend, backendAttempts: result.backendAttempts,
-        rescue: result.rescue ?? null, gate: result.gate };
+        rescue: result.rescue ?? null, gate: result.gate, pieces: result.pieces, pieceBackends: result.pieceBackends };
       if (!store.finishRecording(claimed.id, claimed.attempt_generation, status, outcome)) throw new Error("Metadata commit failed");
       sendJson(res, 200, outcome);
     } catch (error) {

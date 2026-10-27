@@ -40,6 +40,20 @@ after(async () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('piece metadata from a long recording reaches the response and stored outcome', async () => {
+  const a = await app({ transcribeAudioFile: async () => ({
+    text: 'synthetic long text', hasSpeech: true, transcribeMs: 3, audioSentMs: 90000, backend: 'handy_direct_gpu',
+    backendAttempts: [], gate: { enabled: false }, pieces: 3, pieceBackends: ['daemon_gpu', 'handy_direct_gpu', 'daemon_gpu'],
+  }) });
+  const result = await a.upload('piece-metadata', Buffer.from('synthetic long audio'));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.pieces, 3);
+  assert.deepEqual(result.body.pieceBackends, ['daemon_gpu', 'handy_direct_gpu', 'daemon_gpu']);
+  const stored = JSON.parse(db.getRecording(result.body.id).outcome_json);
+  assert.equal(stored.pieces, 3);
+  assert.deepEqual(stored.pieceBackends, ['daemon_gpu', 'handy_direct_gpu', 'daemon_gpu']);
+});
+
 test('migration preserves existing text and legacy raw/multipart success contract', async () => {
   assert.equal(db.getRecording('legacy').transcript, 'old synthetic text');
   const a = await app();
