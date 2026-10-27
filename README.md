@@ -200,6 +200,8 @@ Without `VOICE_VAULT_STAGING_DIR`, behaviour and file locations are unchanged.
 | `POST` | `/api/profile/verify` | Score one clip against the gallery (`accepted`, `score`, `z`) |
 | `DELETE` | `/api/profile` | Remove the enrolled voiceprint (`POST /api/profile/reset` also works) |
 | `POST` | `/api/transcribe` | Save/index original before transcription; optional `X-Recording-Id` stable identity; existing success fields and `gate` report |
+| `POST` | `/api/recording/:id/stream?offset=N` | Append raw 16 kHz mono PCM16 during recording (`application/octet-stream`, at most 4 MB) |
+| `POST` | `/api/recording/:id/stream/finish` | Verify the streamed PCM (`{bytes, sha256, durationMs, device}`) and return the upload response |
 | `GET` | `/api/history?limit=50` | Capture-ordered recordings, including failed/interrupted items and audio availability |
 | `GET` | `/api/recording/:id` | Safe recording state and saved terminal `outcome`; no inference |
 | `POST` | `/api/recording/:id/transcribe` | Explicit retry of saved failure/interruption; completed outcome replay |
@@ -217,6 +219,31 @@ A processing error returns `{ok:false,id,status:"failed",errorCategory,saved,aud
 claims `saved:true`. Restart marks ownerless intake/processing as interrupted and
 never retries automatically. Missing audio is reported separately from the outcome.
 Failure responses contain fixed categories, never private paths or raw backend bodies.
+
+### Streamed intake
+
+A client that keeps recording while it uploads can send its audio in order
+before the recording exists. `POST /api/recording/:id/stream?offset=N` takes
+raw PCM (16 kHz, mono, signed 16-bit little-endian, no WAV header) at byte
+offset `N`. A body at the current end is appended; a repeated or overlapping
+body is answered idempotently with the received count; a body starting past
+the held bytes returns HTTP 409 `stream_gap` with `received`. Each finalized
+piece is transcribed in the background, one at a time, and only its text is
+kept.
+
+`POST /api/recording/:id/stream/finish` sends
+`{"bytes":N,"sha256":"<hex of the canonical WAV>","durationMs":D,"device":"..."}`.
+The server checks the PCM length and the SHA-256 of the canonical WAV built
+from those bytes, then runs exactly the `/api/transcribe` intake with those
+bytes and returns the same response, reusing the pieces already transcribed.
+No session answers HTTP 404 `no_stream`; a length or hash mismatch answers
+HTTP 409 `stream_mismatch` with `received` and creates no recording.
+
+Sessions live beside intake (`<id>.stream.pcm`, bounded by the upload limit)
+and are removed at finish, after a fallback upload for the same identity, or
+after an hour without activity. A session file survives a server restart for
+finishing, but its ahead-of-time pieces do not. Appending to a recording that
+already exists answers HTTP 409 `already_saved`.
 
 ```bash
 # Enroll three 5-second clips
