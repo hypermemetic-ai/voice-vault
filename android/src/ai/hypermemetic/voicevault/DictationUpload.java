@@ -11,6 +11,7 @@ import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
 import javax.net.ssl.SSLException;
 
 /** One recording's upload; cancellation never blocks the UI thread. */
@@ -18,6 +19,7 @@ final class DictationUpload {
     private volatile boolean canceled;
     private volatile HttpURLConnection connection;
     private static final int MAX_RESPONSE_BYTES = 1024 * 1024;
+    static final String DEVICE = "Pixel 10 Native";
 
     static final class Failure extends IOException {
         final String feedback, category;
@@ -69,9 +71,9 @@ final class DictationUpload {
             conn.setDoOutput(audio!=null);
             conn.setConnectTimeout(connectMs);
             conn.setReadTimeout(readMs);
-            conn.setRequestProperty("Content-Type", "audio/mp4");
+            if(audio!=null)conn.setRequestProperty("Content-Type", audio.getName().endsWith(".wav") ? "audio/wav" : "audio/mp4");
             conn.setRequestProperty("X-Duration-Ms", String.valueOf(durationMs));
-            conn.setRequestProperty("X-Device", "Pixel 10 Native");
+            conn.setRequestProperty("X-Device", DEVICE);
             if(identity!=null && RecordingIndex.validId(identity))conn.setRequestProperty("X-Recording-Id",identity);
             if(audio!=null) {
             conn.setFixedLengthStreamingMode(audio.length());
@@ -85,23 +87,79 @@ final class DictationUpload {
             }
             }
             checkCanceled();
-            int status = conn.getResponseCode();
-            InputStream stream=status>=400 ? conn.getErrorStream() : conn.getInputStream();
-            if(stream==null)return new Response(status,"");
-            try (InputStream in = stream; ByteArrayOutputStream body = new ByteArrayOutputStream()) {
-                byte[] buffer = new byte[4096];
-                int read;
-                while ((read = in.read(buffer)) != -1) {
-                    checkCanceled();
-                    if (body.size() + read > MAX_RESPONSE_BYTES) throw new Failure("Invalid server response");
-                    body.write(buffer, 0, read);
-                }
-                checkCanceled();
-                return new Response(status,body.toString("UTF-8"));
-            }
+            return read(conn);
         } finally {
             conn.disconnect();
             connection = null;
+        }
+    }
+
+    /** One PCM append while recording; no response body is needed beyond the JSON. */
+    Response append(String endpoint, byte[] pcm) throws IOException {
+        return bytes(endpoint, pcm, "application/octet-stream", 15000, 30000);
+    }
+
+    /** Verified finish: the server checks these bytes against its stream. */
+    Response finish(String endpoint, long bytes, String sha256, long durationMs) throws IOException {
+        String body = "{\"bytes\":" + bytes + ",\"sha256\":\"" + sha256 + "\",\"durationMs\":" + durationMs
+                + ",\"device\":\"" + DEVICE + "\"}";
+        return bytes(endpoint, body.getBytes(StandardCharsets.UTF_8), "application/json", 30000, 600000);
+    }
+
+    private Response bytes(String endpoint, byte[] body, String contentType, int connectMs, int readMs) throws IOException {
+        checkCanceled();
+        HttpURLConnection conn = (HttpURLConnection) new URL(endpoint).openConnection();
+        connection = conn;
+        try {
+            checkCanceled();
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(connectMs);
+            conn.setReadTimeout(readMs);
+            conn.setRequestProperty("Content-Type", contentType);
+            conn.setFixedLengthStreamingMode(body.length);
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(body);
+            }
+            checkCanceled();
+            return read(conn);
+        } finally {
+            conn.disconnect();
+            connection = null;
+        }
+    }
+
+    private Response read(HttpURLConnection conn) throws IOException {
+        int status = conn.getResponseCode();
+        InputStream stream=status>=400 ? conn.getErrorStream() : conn.getInputStream();
+        if(stream==null)return new Response(status,"");
+        try (InputStream in = stream; ByteArrayOutputStream body = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                checkCanceled();
+                if (body.size() + read > MAX_RESPONSE_BYTES) throw new Failure("Invalid server response");
+                body.write(buffer, 0, read);
+            }
+            checkCanceled();
+            return new Response(status,body.toString("UTF-8"));
+        }
+    }
+
+    /** SHA-256 of the complete local WAV, the server's finish fingerprint. */
+    static String sha256(File file) throws IOException {
+        try {
+            java.security.MessageDigest digest=java.security.MessageDigest.getInstance("SHA-256");
+            try (InputStream in = new FileInputStream(file)) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = in.read(buffer)) != -1) digest.update(buffer, 0, read);
+            }
+            StringBuilder hex=new StringBuilder();
+            for(byte value:digest.digest())hex.append(String.format(java.util.Locale.US,"%02x",value));
+            return hex.toString();
+        } catch(java.security.NoSuchAlgorithmException unavailable) {
+            throw new IOException("Hash unavailable");
         }
     }
 
