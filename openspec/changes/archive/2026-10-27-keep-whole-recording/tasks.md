@@ -8,4 +8,4 @@
 ## 2. Integration checks
 
 - [x] 2.1 Run the full hermetic set used for chunked-transcription and fast-audio-intake with `VOICE_VAULT_SPEAKER_AUTODOWNLOAD=off`; all pass
-- [ ] 2.2 Activation after merge: restart `voice-vault.service`; run one noisy past recording (chosen locally, never copied out) through `transcribeAudioFile` locally (no server, no history entry) and confirm the word count is close to the whole-recording count (about 250), printing counts only
+- [x] 2.2 Activation after merge: restart `voice-vault.service`; run one noisy past recording (chosen locally, never copied out) through `transcribeAudioFile` locally (no server, no history entry) and confirm the word count is close to the whole-recording count (about 250), printing counts only
