@@ -494,7 +494,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
 
     // 2. Anti-Hallucination Layer 1: VAD Silence Filter
     const wavBytes = fs.readFileSync(rawWavPath);
-    let prepared = prepareAudioForTranscription(wavBytes);
+    const prepared = prepareAudioForTranscription(wavBytes);
     let rescue = null;
 
     if (prepared.hasSpeech === false || prepared.wavBytes.length <= 44) {
@@ -514,14 +514,18 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
           gate: { enabled: false, reason: "no_speech" }
         };
       }
-      prepared = rescued.prepared;
       rescue = { type: "highpass", hz: VAD_LF_RESCUE_HIGHPASS_HZ };
     }
 
-    const inputDurationMs = Math.round((prepared.wavBytes.length - 44) / 32);
+    // The trim above only decides whether there is speech. Its trimmed span is
+    // not sent: under loud low-frequency noise (a running car engine) it ends
+    // the span early and drops whole sentences, while Bark writes nothing for
+    // silence or noise. Send the whole recording (high-passed when rescued).
+    const speechWavBytes = rescue ? fs.readFileSync(rescueWavPath) : wavBytes;
+    const inputDurationMs = Math.round((speechWavBytes.length - 44) / 32);
 
     // 3. Anti-Hallucination Layer 2: target-speaker voiceprint gate
-    let audioToTranscribe = prepared.wavBytes;
+    let audioToTranscribe = speechWavBytes;
     let gate = { enabled: false, reason: gateRequested ? "not_enrolled" : "disabled" };
 
     if (gateRequested) {
@@ -542,7 +546,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
         if (embedder && !compatibility.compatible) {
           gate = { enabled: false, reason: compatibility.reason };
         } else if (embedder) {
-          const decoded = decodeWav(prepared.wavBytes);
+          const decoded = decodeWav(speechWavBytes);
           if (!decoded) {
             gate = { enabled: false, reason: "undecodable_audio" };
           } else {

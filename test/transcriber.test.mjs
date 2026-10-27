@@ -520,6 +520,44 @@ test("a short recording is one request and reports one piece", async () => {
   }
 });
 
+test("a recording with speech reaches the model whole, silence included", async () => {
+  const dir = tempDir("whole-recording");
+  const file = writeSyntheticWav(dir, "whole.wav", concatPcm([silencePcm(4), speechBurst(3), silencePcm(4)]));
+  const calls = [];
+  try {
+    const result = await transcribeAudioFile(file, "whole-recording", {
+      speakerGate: false,
+      transcribe: async (wavPath) => {
+        calls.push(wavDurationMs(wavPath));
+        return { text: "Spoken words.", transcribe_ms: 5, backend: "daemon_gpu" };
+      },
+    });
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0] > 10_900 && calls[0] <= 11_000, `model received ${calls[0]}ms of 11000ms`);
+    assert.ok(result.audioSentMs > 10_900);
+    assert.equal(result.text, "Spoken words.");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a silent recording reports no speech without calling the model", async () => {
+  const dir = tempDir("whole-silence");
+  const file = writeSyntheticWav(dir, "silence.wav", silencePcm(11));
+  let called = false;
+  try {
+    const result = await transcribeAudioFile(file, "whole-silence", {
+      speakerGate: false,
+      transcribe: async () => { called = true; return { text: "invented", backend: "daemon_gpu" }; },
+    });
+    assert.equal(called, false);
+    assert.equal(result.hasSpeech, false);
+    assert.equal(result.backend, "vad_silence_filter");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a long recording is transcribed as bounded pieces joined in order", async () => {
   const dir = tempDir("piece-long");
   const file = writeSyntheticWav(dir, "long.wav", flatTone(100));
