@@ -5,11 +5,13 @@ import path from "node:path";
 import os from "node:os";
 import { prepareAudioForTranscription } from "/home/qqp/projects/qq-dictation/src/recognizer.mjs";
 import { decodeWav, encodePcm16Wav } from "./wav.mjs";
+import { cutPieces, resolvePieceOptions } from "./chunker.mjs";
 import { gateAudio, summarizeGate } from "./gate.mjs";
 import { createSpeakerEmbedder } from "./speaker.mjs";
 import { loadVoiceProfile, profileCompatibility } from "./profile.mjs";
+import { normalizeTranscript } from "./transcript-normalize.mjs";
 
-const DEFAULT_SOCKET_PATH = "/tmp/orca_whisper.sock";
+const DEFAULT_SOCKET_PATH = "/tmp/voice-vault-asr.sock";
 const DEFAULT_HANDY_BIN = "/home/qqp/.local/bin/handy";
 
 /**
@@ -132,7 +134,8 @@ export function cleanTranscript(text) {
   // Trailing repetitive echo loops
   s = s.replace(/\b(\w+[\s\w]{2,20}?)\s+\1\s+\1\b/gi, "$1");
 
-  return s.trim();
+  // Deterministic written-form repair (numbers, acronyms, user vocabulary).
+  return normalizeTranscript(s);
 }
 
 /**
@@ -284,7 +287,7 @@ export function queryHandyDirect(wavPath, options = {}) {
 
     const child = spawn(bin, [
       "--transcribe-file", wavPath,
-      "--model", "turbo",
+      "--model", envString("WHISPER_MODEL", "turbo"),
       "--device-index", String(deviceIndex),
       "--json"
     ], {
@@ -379,6 +382,67 @@ export async function defaultTranscribe(wavPath, reqId, options = {}) {
   throw failure;
 }
 
+/** Degradation order used to report the worst tier any piece needed (D6). */
+const BACKEND_DEGRADATION = Object.freeze({
+  daemon_gpu: 0,
+  handy_direct_gpu: 1,
+  handy_direct_igpu: 2,
+  handy_direct_cpu: 3,
+});
+
+function mostDegradedBackend(backends) {
+  let worst = backends[0] || "daemon_gpu";
+  let worstRank = BACKEND_DEGRADATION[worst] ?? Number.MAX_SAFE_INTEGER;
+  for (const backend of backends.slice(1)) {
+    const rank = BACKEND_DEGRADATION[backend] ?? Number.MAX_SAFE_INTEGER;
+    if (rank > worstRank) {
+      worst = backend;
+      worstRank = rank;
+    }
+  }
+  return worst;
+}
+
+const SEAM_DEDUP_MAX_WORDS = 12;
+const SEAM_WORD_PATTERN = /[\p{L}\p{N}][\p{L}\p{N}'’]*/gu;
+
+/** Lowercased word tokens with their end offsets, ignoring punctuation. */
+function seamWords(text) {
+  return Array.from(text.matchAll(SEAM_WORD_PATTERN), (match) => ({
+    word: match[0].toLowerCase(),
+    end: match.index + match[0].length,
+  }));
+}
+
+/**
+ * Drop the longest run of words the later piece repeats from the end of the
+ * earlier one (design D5). Only forced seams call this: a forced cut overlaps
+ * the audio, so the model writes the seam words twice. Pause seams are never
+ * deduplicated.
+ */
+function dedupForcedSeam(earlierText, laterText) {
+  const laterWords = seamWords(laterText);
+  const earlierWords = seamWords(earlierText);
+  if (laterWords.length === 0 || earlierWords.length === 0) return laterText;
+
+  const maxRun = Math.min(SEAM_DEDUP_MAX_WORDS, laterWords.length, earlierWords.length);
+  for (let run = maxRun; run >= 1; run -= 1) {
+    let matches = true;
+    for (let i = 0; i < run; i += 1) {
+      if (earlierWords[earlierWords.length - run + i].word !== laterWords[i].word) {
+        matches = false;
+        break;
+      }
+    }
+    if (!matches) continue;
+    return laterText
+      .slice(laterWords[run - 1].end)
+      .replace(/^[\s.,;:!?…—–-]+/u, "")
+      .trim();
+  }
+  return laterText;
+}
+
 /**
  * Retry the whole-file VAD on a high-passed copy of a clip the ordinary filter
  * rejected. Rejects when speech is still absent, so this only ever rescues
@@ -430,7 +494,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
 
     // 2. Anti-Hallucination Layer 1: VAD Silence Filter
     const wavBytes = fs.readFileSync(rawWavPath);
-    let prepared = prepareAudioForTranscription(wavBytes);
+    const prepared = prepareAudioForTranscription(wavBytes);
     let rescue = null;
 
     if (prepared.hasSpeech === false || prepared.wavBytes.length <= 44) {
@@ -450,14 +514,18 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
           gate: { enabled: false, reason: "no_speech" }
         };
       }
-      prepared = rescued.prepared;
       rescue = { type: "highpass", hz: VAD_LF_RESCUE_HIGHPASS_HZ };
     }
 
-    const inputDurationMs = Math.round((prepared.wavBytes.length - 44) / 32);
+    // The trim above only decides whether there is speech. Its trimmed span is
+    // not sent: under loud low-frequency noise (a running car engine) it ends
+    // the span early and drops whole sentences, while Bark writes nothing for
+    // silence or noise. Send the whole recording (high-passed when rescued).
+    const speechWavBytes = rescue ? fs.readFileSync(rescueWavPath) : wavBytes;
+    const inputDurationMs = Math.round((speechWavBytes.length - 44) / 32);
 
     // 3. Anti-Hallucination Layer 2: target-speaker voiceprint gate
-    let audioToTranscribe = prepared.wavBytes;
+    let audioToTranscribe = speechWavBytes;
     let gate = { enabled: false, reason: gateRequested ? "not_enrolled" : "disabled" };
 
     if (gateRequested) {
@@ -478,7 +546,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
         if (embedder && !compatibility.compatible) {
           gate = { enabled: false, reason: compatibility.reason };
         } else if (embedder) {
-          const decoded = decodeWav(prepared.wavBytes);
+          const decoded = decodeWav(speechWavBytes);
           if (!decoded) {
             gate = { enabled: false, reason: "undecodable_audio" };
           } else {
@@ -525,23 +593,90 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
 
     fs.writeFileSync(filteredWavPath, audioToTranscribe);
 
-    // 4. Transcribe via the backend cascade (warm daemon -> dGPU -> iGPU -> CPU)
+    // 4. Bounded pieces (design D1-D3). Audio within one piece keeps the
+    //    original single-request path; only its response gains `pieces`.
     const transcribe = options.transcribe || defaultTranscribe;
-    const resp = await transcribe(filteredWavPath, reqId);
+    const decodedAudio = decodeWav(audioToTranscribe);
+    const pieceOptions = resolvePieceOptions(
+      decodedAudio ? { sampleRate: decodedAudio.sampleRate } : {},
+    );
+    const maxPieceSamples = Math.round((pieceOptions.sampleRate * pieceOptions.maxMs) / 1000);
+    const audioSentMs = Math.round((audioToTranscribe.length - 44) / 32);
 
-    const rawText = (resp && typeof resp.text === "string") ? resp.text : "";
-    const cleanText = cleanTranscript(rawText);
+    if (!decodedAudio || decodedAudio.samples.length <= maxPieceSamples) {
+      const resp = await transcribe(filteredWavPath, reqId);
+      const rawText = (resp && typeof resp.text === "string") ? resp.text : "";
+      const cleanText = cleanTranscript(rawText);
+
+      return {
+        ok: true,
+        text: cleanText,
+        hasSpeech: cleanText.length > 0,
+        rejected: false,
+        durationMs: inputDurationMs,
+        audioSentMs,
+        transcribeMs: resp?.transcribe_ms || (Date.now() - startTime),
+        backend: resp?.backend || "daemon_gpu",
+        backendAttempts: resp?.attempts,
+        pieces: 1,
+        rescue,
+        gate: summarizeGate(gate),
+      };
+    }
+
+    // 5. Sequential per-piece cascade (D4), forced-seam dedup and join (D5).
+    const pieces = cutPieces(decodedAudio.samples, pieceOptions);
+    const pieceBackends = [];
+    const pieceAttempts = [];
+    let joined = "";
+    let pieceTranscribeMs = 0;
+
+    for (let index = 0; index < pieces.length; index += 1) {
+      const piece = pieces[index];
+      const pieceWavPath = path.join(tmpDir, `piece-${index}.wav`);
+      const piecePcm = decodedAudio.samples.subarray(piece.startSample, piece.endSample);
+      fs.writeFileSync(pieceWavPath, encodePcm16Wav(piecePcm, pieceOptions.sampleRate));
+
+      let resp;
+      try {
+        resp = await transcribe(pieceWavPath, `${reqId}-p${index}`);
+      } catch (error) {
+        // A piece that exhausts every tier fails the whole transcription; the
+        // index identifies which piece without changing the failure shape.
+        if (error && typeof error === "object") error.pieceIndex = index;
+        throw error;
+      }
+
+      const backend = resp?.backend || "daemon_gpu";
+      pieceBackends.push(backend);
+      if (Number.isFinite(Number(resp?.transcribe_ms))) {
+        pieceTranscribeMs += Number(resp.transcribe_ms);
+      }
+      for (const attempt of resp?.attempts || []) {
+        pieceAttempts.push({ piece: index, ...attempt });
+      }
+
+      let text = (resp && typeof resp.text === "string") ? resp.text.trim() : "";
+      if (text && index > 0 && pieces[index - 1].forced && joined) {
+        text = dedupForcedSeam(joined, text);
+      }
+      if (text) joined = joined ? `${joined} ${text}` : text;
+    }
+
+    const joinedText = cleanTranscript(joined);
 
     return {
       ok: true,
-      text: cleanText,
-      hasSpeech: cleanText.length > 0,
+      text: joinedText,
+      hasSpeech: joinedText.length > 0,
       rejected: false,
       durationMs: inputDurationMs,
-      audioSentMs: Math.round((audioToTranscribe.length - 44) / 32),
-      transcribeMs: resp?.transcribe_ms || (Date.now() - startTime),
-      backend: resp?.backend || "daemon_gpu",
-      backendAttempts: resp?.attempts,
+      audioSentMs,
+      transcribeMs: pieceTranscribeMs || (Date.now() - startTime),
+      backend: mostDegradedBackend(pieceBackends),
+      backendAttempts: pieceAttempts,
+      pieces: pieces.length,
+      pieceBackends,
       rescue,
       gate: summarizeGate(gate),
     };
