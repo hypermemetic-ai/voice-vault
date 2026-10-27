@@ -299,7 +299,7 @@ host (AMD Ryzen 7 250 + RTX A2000, ONNX CPU provider, 3.8 s utterance):
 | `VOICE_VAULT_SPEAKER_AUTODOWNLOAD` | `on` | Set `off` to never download models |
 | `VOICE_VAULT_PYTHON` | auto-detected | Python interpreter for the sidecar |
 | `VOICE_VAULT_SPEAKER_THREADS` | `4` | onnxruntime intra-op threads |
-| `WHISPER_SOCKET` | `/tmp/orca_whisper.sock` | Warm Whisper daemon unix socket |
+| `WHISPER_SOCKET` | `/tmp/voice-vault-asr.sock` | Warm ASR daemon unix socket |
 | `WHISPER_SOCKET_TIMEOUT_MS` | `15000` | Daemon cap before falling back to `handy` |
 | `HANDY_BIN` | `/home/qqp/.local/bin/handy` | Executable used by the direct tiers |
 | `HANDY_DEVICE_INDEX_GPU` | `1` | `handy --list-devices` index of the RTX A2000 |

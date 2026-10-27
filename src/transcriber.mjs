@@ -8,8 +8,9 @@ import { decodeWav, encodePcm16Wav } from "./wav.mjs";
 import { gateAudio, summarizeGate } from "./gate.mjs";
 import { createSpeakerEmbedder } from "./speaker.mjs";
 import { loadVoiceProfile, profileCompatibility } from "./profile.mjs";
+import { normalizeTranscript } from "./transcript-normalize.mjs";
 
-const DEFAULT_SOCKET_PATH = "/tmp/orca_whisper.sock";
+const DEFAULT_SOCKET_PATH = "/tmp/voice-vault-asr.sock";
 const DEFAULT_HANDY_BIN = "/home/qqp/.local/bin/handy";
 
 /**
@@ -132,7 +133,8 @@ export function cleanTranscript(text) {
   // Trailing repetitive echo loops
   s = s.replace(/\b(\w+[\s\w]{2,20}?)\s+\1\s+\1\b/gi, "$1");
 
-  return s.trim();
+  // Deterministic written-form repair (numbers, acronyms, user vocabulary).
+  return normalizeTranscript(s);
 }
 
 /**

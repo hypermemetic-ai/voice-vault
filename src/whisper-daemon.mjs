@@ -5,7 +5,7 @@ import readline from "node:readline";
 import { spawn } from "node:child_process";
 import { resolveDisplay } from "./transcriber.mjs";
 
-const SOCKET_PATH = process.env.WHISPER_SOCKET || "/tmp/orca_whisper.sock";
+const SOCKET_PATH = process.env.WHISPER_SOCKET || "/tmp/voice-vault-asr.sock";
 const HANDY_BIN = process.env.HANDY_BIN || "/home/qqp/.local/bin/handy";
 const DEVICE_INDEX = process.env.HANDY_DEVICE_INDEX_GPU ?? "0";
 const MODEL = process.env.WHISPER_MODEL || "turbo";
@@ -21,11 +21,11 @@ const requestQueue = [];
 let inFlight = null;
 
 function log(...args) {
-  console.log(`[whisper-daemon ${new Date().toISOString()}]`, ...args);
+  console.log(`[voice-vault-asr ${new Date().toISOString()}]`, ...args);
 }
 
 function logError(...args) {
-  console.error(`[whisper-daemon ${new Date().toISOString()}]`, ...args);
+  console.error(`[voice-vault-asr ${new Date().toISOString()}]`, ...args);
 }
 
 function startHandy() {
