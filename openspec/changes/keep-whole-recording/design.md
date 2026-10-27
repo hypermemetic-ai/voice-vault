@@ -36,5 +36,5 @@ Rollback is a revert. A switch would keep a known speech-dropping path alive.
 ## Migration Plan
 
 Merge with the chunked-transcription change, restart `voice-vault.service`.
-Verify by running the 127 s car recording through `transcribeAudioFile`
+Verify by running one noisy past recording through `transcribeAudioFile`
 locally (no server, no history entry) and checking the word count only.

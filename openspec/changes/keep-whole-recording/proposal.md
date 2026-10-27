@@ -11,7 +11,7 @@ low-frequency noise it judges speech to have ended early and drops the rest.
 Measured on 2026-10-27 with the live Bark model (word counts only, no history
 changes):
 
-- A 127 s car recording: the trim kept the first 17 s. 14 words were stored;
+- A 127 s recording with heavy engine rumble: the trim kept the first 17 s. 14 words were stored;
   the whole recording gives 250.
 - A 42 s recording: the trim kept 1 s. 1 word was stored; the whole recording
   gives 87.
