@@ -213,6 +213,13 @@ async function collectClips(req, body) {
 export function createAppServer(options = {}) {
   const rawDir = options.rawDir || DEFAULT_RAW_DIR;
   const publicDir = options.publicDir || PUBLIC_DIR;
+  // Opt-in fast folder for accepted audio; unset keeps the archive-only path.
+  const stagingDir = options.stagingDir !== undefined
+    ? options.stagingDir
+    : process.env.VOICE_VAULT_STAGING_DIR || null;
+  const stagingSweepMs = options.stagingSweepMs !== undefined
+    ? options.stagingSweepMs
+    : parseInt(process.env.VOICE_VAULT_STAGING_SWEEP_MS || "600000", 10);
   fs.mkdirSync(rawDir, { recursive: true });
   const runTranscription = options.transcribeAudioFile || transcribeAudioFile;
   const store = options.recordingStore || recordingDb;
@@ -222,15 +229,29 @@ export function createAppServer(options = {}) {
   const liveAttempts = new Set();
   const terminal = new Set(["transcribed", "no_speech", "speaker_rejected"]);
   const validId = id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(id);
-  const ownedPath = rec => {
+  const recordName = rec => {
     if (!rec || !validId(rec.id) || !rec.raw_filename ||
         path.basename(rec.raw_filename) !== rec.raw_filename ||
         !rec.raw_filename.startsWith(`${rec.id}.`)) return null;
-    const file = path.join(rawDir, rec.raw_filename);
+    return rec.raw_filename;
+  };
+  const audioFileIn = (dir, name) => {
+    if (!dir || !name) return null;
+    const file = path.join(dir, name);
     try { const stat = files.lstatSync(file); return stat.isFile() && !stat.isSymbolicLink() ? file : null; }
     catch { return null; }
   };
-  const available = rec => { const file = ownedPath(rec); return Boolean(file && files.statSync(file).size > 0); };
+  // A recording's audio may briefly exist in both folders while it is archived.
+  const ownedFiles = rec => {
+    const name = recordName(rec);
+    return name ? [stagingDir, rawDir].map(dir => audioFileIn(dir, name)).filter(Boolean) : [];
+  };
+  const locate = rec => ownedFiles(rec)[0] || null;
+  const leftoverIn = (dir, name) => {
+    if (!dir || !name) return false;
+    try { files.lstatSync(path.join(dir, name)); return true; } catch { return false; }
+  };
+  const available = rec => { const file = locate(rec); return Boolean(file && files.statSync(file).size > 0); };
   const category = error => {
     const code = String(error?.code || "");
     const message = String(error?.message || "");
@@ -241,6 +262,138 @@ export function createAppServer(options = {}) {
     if (/backend|whisper|handy/i.test(message)) return "backend_failed";
     return "processing_failed";
   };
+  // Write one accepted upload durably into `dir`: .part → fsync → rename →
+  // fsync the directory. The same protocol serves staging and archive.
+  const writeIntake = (dir, rawFilename, audioData, existing) => {
+    const file = path.join(dir, rawFilename);
+    const temporary = `${file}.part`;
+    let fd;
+    let createdTemporary = false;
+    try {
+      // A crash may leave only this identity's incomplete intake staging file.
+      if (existing && files.existsSync(temporary)) {
+        const stale = files.lstatSync(temporary);
+        if (!stale.isFile() || stale.isSymbolicLink()) throw Object.assign(new Error("Unsafe intake staging"), { code: "EACCES" });
+        files.unlinkSync(temporary);
+      }
+      fd = files.openSync(temporary, "wx", 0o600); createdTemporary = true;
+      files.writeFileSync(fd, audioData);
+      files.fsyncSync(fd);
+      files.closeSync(fd); fd = null;
+      files.renameSync(temporary, file);
+      const directory = files.openSync(dir, "r");
+      try { files.fsyncSync(directory); } finally { files.closeSync(directory); }
+    } finally {
+      if (fd != null) files.closeSync(fd);
+      if (createdTemporary) { try { files.unlinkSync(temporary); } catch {} }
+    }
+  };
+
+  // Serial archive queue: staged audio moves to the archive after the attempt's
+  // response, one file at a time so it never competes with itself on slow disks.
+  const archiveQueue = [];
+  const archiveWaiters = [];
+  let archiveRunning = false;
+  const archiveRecording = id => {
+    if (liveAttempts.has(id)) return;
+    const name = recordName(store.getRecording(id));
+    const source = stagingDir && name ? path.join(stagingDir, name) : null;
+    if (!source) return;
+    let sourceStat;
+    try { sourceStat = files.lstatSync(source); } catch { return; }
+    if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) return;
+    const destination = path.join(rawDir, name);
+    let existing = null;
+    try { existing = files.lstatSync(destination); } catch {}
+    if (existing) {
+      // A crash between rename and unlink leaves an identical archive copy.
+      if (existing.isFile() && !existing.isSymbolicLink() && existing.size === sourceStat.size &&
+          files.readFileSync(source).equals(files.readFileSync(destination))) {
+        files.unlinkSync(source); return;
+      }
+      console.error(`Archived audio for ${name} differs from the staged copy; keeping both`);
+      return;
+    }
+    if (liveAttempts.has(id)) return;
+    const temporary = `${destination}.part`;
+    try {
+      const stale = files.lstatSync(temporary);
+      if (!stale.isFile() || stale.isSymbolicLink()) throw new Error("Unsafe archive staging");
+      files.unlinkSync(temporary);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    let fd;
+    try {
+      fd = files.openSync(temporary, "wx", 0o600);
+      files.writeFileSync(fd, files.readFileSync(source));
+      files.fsyncSync(fd);
+      files.closeSync(fd); fd = null;
+      files.renameSync(temporary, destination);
+      const directory = files.openSync(rawDir, "r");
+      try { files.fsyncSync(directory); } finally { files.closeSync(directory); }
+    } catch (error) {
+      if (fd != null) { try { files.closeSync(fd); } catch {} }
+      try { files.unlinkSync(temporary); } catch {}
+      throw error;
+    }
+    // Re-check the staged copy and attempt state before removing it.
+    let after = null;
+    try { after = files.lstatSync(source); } catch {}
+    if (!after || after.size !== sourceStat.size || after.mtimeMs !== sourceStat.mtimeMs || liveAttempts.has(id)) return;
+    files.unlinkSync(source);
+  };
+  const runArchiveQueue = () => {
+    if (archiveRunning) return;
+    archiveRunning = true;
+    try {
+      while (archiveQueue.length) {
+        const id = archiveQueue.shift();
+        try { archiveRecording(id); }
+        catch (error) { console.error(`Archiving audio failed: ${category(error)}`); }
+      }
+    } finally {
+      archiveRunning = false;
+      for (const resolve of archiveWaiters.splice(0)) resolve();
+    }
+  };
+  const enqueueArchive = id => {
+    if (!stagingDir) return;
+    archiveQueue.push(id);
+    setImmediate(runArchiveQueue);
+  };
+  const archiveIdle = () => new Promise(resolve => {
+    if (!archiveRunning && archiveQueue.length === 0) resolve();
+    else archiveWaiters.push(resolve);
+  });
+
+  // Staging never accumulates: archive leftovers at start and periodically,
+  // and drop abandoned intake temporaries.
+  const ABANDONED_PART_MS = 60 * 60 * 1000;
+  const sweepStaging = () => {
+    if (!stagingDir) return;
+    let entries;
+    try { entries = files.readdirSync(stagingDir); } catch { return; }
+    const now = Date.now();
+    for (const name of entries) {
+      if (name.endsWith(".part")) {
+        const file = path.join(stagingDir, name);
+        try {
+          const stat = files.lstatSync(file);
+          if (stat.isFile() && !stat.isSymbolicLink() && now - stat.mtimeMs >= ABANDONED_PART_MS) files.unlinkSync(file);
+        } catch {}
+        continue;
+      }
+      const id = name.slice(0, name.indexOf("."));
+      const rec = validId(id) ? store.getRecording(id) : null;
+      if (!rec || recordName(rec) !== name) {
+        console.error(`Staging sweep left an unowned file alone: ${name}`);
+        continue;
+      }
+      enqueueArchive(rec.id);
+    }
+  };
+
   const view = rec => ({ id: rec.id, created_at: rec.created_at, duration_ms: rec.duration_ms,
     transcript: rec.transcript, status: rec.status, error_category: rec.error_category,
     attempt_generation: rec.attempt_generation, audio_available: available(rec),
@@ -266,12 +419,13 @@ export function createAppServer(options = {}) {
     let claimed;
     try { claimed = store.claimRecording(rec.id); }
     catch (error) {
-      sendJson(res, 500, { ok: false, id: rec.id, errorCategory: category(error), saved: false, audioAvailable: available(rec) }); return;
+      sendJson(res, 500, { ok: false, id: rec.id, errorCategory: category(error), saved: false, audioAvailable: available(rec) });
+      enqueueArchive(rec.id); return;
     }
     if (!claimed) { respondExisting(res, store.getRecording(rec.id)); return; }
     liveAttempts.add(claimed.id);
     try {
-      const result = await runTranscription(ownedPath(claimed), claimed.id, options.transcribeOptions);
+      const result = await runTranscription(locate(claimed), claimed.id, options.transcribeOptions);
       const status = result.rejected ? "speaker_rejected" : result.hasSpeech ? "transcribed" : "no_speech";
       const outcome = { ok: true, id: claimed.id, text: result.text, hasSpeech: result.hasSpeech,
         rejected: Boolean(result.rejected), durationMs: claimed.duration_ms,
@@ -287,10 +441,10 @@ export function createAppServer(options = {}) {
       console.error(`Recording processing failed: ${errorCategory}`);
       sendJson(res, 500, { ok: false, id: claimed.id, status: "failed", errorCategory,
         saved: metadataSaved && available(claimed), audioAvailable: available(claimed) });
-    } finally { liveAttempts.delete(claimed.id); }
+    } finally { liveAttempts.delete(claimed.id); enqueueArchive(claimed.id); }
   };
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     const pathname = url.pathname;
 
@@ -499,7 +653,7 @@ export function createAppServer(options = {}) {
         const existing = reconcileIdle(store.getRecording(id));
         if (existing) {
           const previousFingerprint = existing.fingerprint || (available(existing)
-            ? crypto.createHash("sha256").update(files.readFileSync(ownedPath(existing))).digest("hex") : null);
+            ? crypto.createHash("sha256").update(files.readFileSync(locate(existing))).digest("hex") : null);
           if (!previousFingerprint || previousFingerprint !== fingerprint) {
             sendJson(res, 409, { ok: false, id, errorCategory: "identity_conflict" }); return;
           }
@@ -513,37 +667,30 @@ export function createAppServer(options = {}) {
           sendJson(res, 409, { ok: false, id, errorCategory: "identity_conflict" }); return;
         }
         let rec;
+        let staged = false;
         try {
           rec = existing ? store.updateRecording(id, "intake", "", false) : store.saveRecording({ id, durationMs: Math.max(0, durationMs || 0), clientDevice,
             rawFilename, status: "intake", fingerprint, audioAvailable: false });
-          const file = path.join(rawDir, rawFilename);
-          const temporary = `${file}.part`;
-          let fd, createdTemporary = false;
-          try {
-            // A crash may leave only this identity's incomplete intake staging file.
-            if (existing && files.existsSync(temporary)) {
-              const stale = files.lstatSync(temporary);
-              if (!stale.isFile() || stale.isSymbolicLink()) throw Object.assign(new Error("Unsafe intake staging"), { code: "EACCES" });
-              files.unlinkSync(temporary);
+          if (stagingDir) {
+            try { writeIntake(stagingDir, rawFilename, audioData, existing); }
+            catch (error) {
+              // Any staging failure falls back to the archive; intake still succeeds.
+              console.error(`Staging intake failed (${category(error)}); falling back to the archive`);
+              writeIntake(rawDir, rawFilename, audioData, existing);
             }
-            fd = files.openSync(temporary, "wx", 0o600); createdTemporary = true;
-            files.writeFileSync(fd, audioData);
-            files.fsyncSync(fd);
-            files.closeSync(fd); fd = null;
-            files.renameSync(temporary, file);
-            const directory = files.openSync(rawDir, "r");
-            try { files.fsyncSync(directory); } finally { files.closeSync(directory); }
-          } finally {
-            if (fd != null) files.closeSync(fd);
-            if (createdTemporary) { try { files.unlinkSync(temporary); } catch {} }
+          } else {
+            writeIntake(rawDir, rawFilename, audioData, existing);
           }
+          staged = Boolean(audioFileIn(stagingDir, rawFilename));
           rec = store.updateRecording(id, "pending", "", true);
         } catch (error) {
           const errorCategory = category(error);
           let metadataSaved = false;
           try { if (rec) metadataSaved = Boolean(store.updateRecording(id, "failed", errorCategory, available(rec))); } catch {}
           sendJson(res, 500, { ok: false, id, status: "failed", errorCategory,
-            saved: false, audioAvailable: Boolean(rec && available(rec)), metadataSaved }); return;
+            saved: false, audioAvailable: Boolean(rec && available(rec)), metadataSaved });
+          if (staged) enqueueArchive(id);
+          return;
         }
         await processRecording(res, rec);
         return;
@@ -565,9 +712,9 @@ export function createAppServer(options = {}) {
         if (req.method === "DELETE" && !recordingMatch[2]) {
           if (rec.status === "processing" || rec.status === "intake") { sendJson(res, 409, { ok: false, id, errorCategory: "busy" }); return; }
           try {
-            const file = ownedPath(rec);
-            if (file) files.unlinkSync(file);
-            else if (rec.raw_filename && files.existsSync(path.join(rawDir, path.basename(rec.raw_filename)))) {
+            for (const file of ownedFiles(rec)) files.unlinkSync(file);
+            const name = recordName(rec) || (rec.raw_filename ? path.basename(rec.raw_filename) : null);
+            if (leftoverIn(stagingDir, name) || leftoverIn(rawDir, name)) {
               sendJson(res, 409, { ok: false, id, errorCategory: "cleanup_incomplete" }); return;
             }
             store.deleteRecording(id);
@@ -599,7 +746,7 @@ export function createAppServer(options = {}) {
           return;
         }
 
-        const filePath = ownedPath(rec);
+        const filePath = locate(rec);
         if (!filePath || !available(rec)) {
           sendJson(res, 404, { ok: false, error: "Audio file missing on disk" });
           return;
@@ -673,6 +820,17 @@ export function createAppServer(options = {}) {
       sendJson(res, err.statusCode || 500, { ok: false, errorCategory: category(err), error: pathname.startsWith("/api/profile/") && err.statusCode === 400 && /shorter than/.test(err.message) ? "Enrollment clips are shorter than the required minimum" : "Request failed" });
     }
   });
+  if (stagingDir) {
+    sweepStaging();
+    if (Number.isFinite(stagingSweepMs) && stagingSweepMs > 0) {
+      const timer = setInterval(sweepStaging, stagingSweepMs);
+      timer.unref?.();
+      server.on("close", () => clearInterval(timer));
+    }
+  }
+  // Test hook: resolves once the serial archive queue is drained.
+  server.archiveIdle = archiveIdle;
+  return server;
 }
 
 export function startServer(options = {}) {

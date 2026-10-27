@@ -166,6 +166,31 @@ The warm daemon refuses WAV input longer than `WHISPER_MAX_AUDIO_MS` (default
 
 ---
 
+## Audio Storage
+
+Accepted uploads are written with a durable protocol (`<id><ext>.part` → fsync →
+rename → directory fsync) and transcribed from that copy. By default it lands in
+the raw archive (`VOICE_VAULT_STORAGE`), so the request waits for the archive
+volume. When `VOICE_VAULT_STAGING_DIR` points at fast local storage, intake
+writes and fsyncs there first, transcription reads the staged copy, and the
+audio moves to the archive after the attempt's response. If staging cannot take
+the file (for example `ENOSPC`, `EACCES` or a missing folder), intake falls back
+to the archive and the request still succeeds.
+
+The move runs on a single serial queue so it never competes with itself on a
+slow disk. It copies with the same durable protocol and removes the staged copy
+only after re-checking that the attempt has ended and the staged bytes are
+unchanged; a move that fails leaves the staged copy retrievable for the next
+sweep. Playback, explicit retry, delete and the duplicate-upload check resolve
+audio from either location, and delete removes every copy.
+
+At startup and then every `VOICE_VAULT_STAGING_SWEEP_MS`, the server archives
+anything left in staging, retries failed moves, and deletes abandoned `.part`
+files older than one hour. Files without a matching recording are left alone.
+Without `VOICE_VAULT_STAGING_DIR`, behaviour and file locations are unchanged.
+
+---
+
 ## API
 
 | Method | Path | Description |
@@ -302,7 +327,9 @@ host (AMD Ryzen 7 250 + RTX A2000, ONNX CPU provider, 3.8 s utterance):
 | --- | --- | --- |
 | `PORT` / `HOST` | `3005` / `0.0.0.0` | HTTP bind address |
 | `VOICE_VAULT_DB` | `/home/qqp/recordings/voice-vault/history.db` | SQLite database |
-| `VOICE_VAULT_STORAGE` | `/home/qqp/recordings/voice-vault/raw` | Raw audio directory |
+| `VOICE_VAULT_STORAGE` | `/home/qqp/recordings/voice-vault/raw` | Raw audio archive directory |
+| `VOICE_VAULT_STAGING_DIR` | — | Fast staging folder for accepted audio; unset keeps the archive-only path |
+| `VOICE_VAULT_STAGING_SWEEP_MS` | `600000` | Interval for archiving leftover staged audio |
 | `VOICE_VAULT_SPEAKER_GATE` | `on` | Set `off` to disable gating globally |
 | `VOICE_VAULT_SPEAKER_BACKEND` | `auto` | `auto` \| `onnx` \| `dsp` |
 | `VOICE_VAULT_SPEAKER_PROVIDER` | `cpu` | `cpu` \| `cuda` \| `tensorrt` |
