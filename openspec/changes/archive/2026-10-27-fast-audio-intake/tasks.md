@@ -14,4 +14,4 @@
 ## 3. Integration checks
 
 - [x] 3.1 Run `VOICE_VAULT_SPEAKER_AUTODOWNLOAD=off node --test test/server.test.mjs test/recording-recovery-server.test.mjs test/transcribe-e2e.test.mjs` plus the hermetic readiness set (`test/wav.test.mjs test/vad.test.mjs test/transcriber.test.mjs test/android-state.test.mjs`); all pass with synthetic data only (any pre-existing environment failure must fail identically on the base commit)
-- [ ] 3.2 Activation on qq-box after merge per design Migration Plan: create the staging folder, add the `staging.conf` drop-in, restart `voice-vault.service`, run one synthetic upload under an `activation-check-*` id, confirm staging empties and the archive holds the file, then delete the synthetic recording via the API
+- [x] 3.2 Activation on qq-box after merge per design Migration Plan: create the staging folder, add the `staging.conf` drop-in, restart `voice-vault.service`, run one synthetic upload under an `activation-check-*` id, confirm staging empties and the archive holds the file, then delete the synthetic recording via the API
