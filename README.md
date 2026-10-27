@@ -19,7 +19,7 @@ Ultra-reliable, local-first asynchronous voice recorder and dictation tool for A
 - **Physical Side-Button Controls**: Taps act on release; holds (0.5 s) act while pressed, with a haptic. In Dictation Mode, tap Volume Up to start/stop recording and tap Volume Down to finish, add the text to the focused composer and send it when Auto-send is on. Hold Volume Up toggles Dictation Mode (with the mode off, a Volume Up tap still raises the volume and shows the slider; Volume Down is untouched). Hold Volume Down toggles Auto-send; the pill always shows `AUTO-SEND` or `NO SEND` while Dictation Mode is on, and the dashboard checkbox shows the same setting.
 - **Composer Auto-send (any app; tuned for T3 Code)**: Adds the transcript to whatever is already in the focused input (never replaces the draft), then clicks that composer's own submit control once — matched by accessible name (`Send`, `Submit message`, `Queue message`, `Steer message`, …) inside the composer, without app-specific view IDs or screen positions. Sends as soon as the control is enabled; allows up to five seconds after confirmed insertion for Stop to become Send. Reports `Sent ✓` / `Queued ✓` when the composer clears, or says why it didn't send.
 - **Floating Screen Edge Bubble**: Draggable on-screen toggle button for devices without rear-tap gestures.
-- **Whisper Large v3 Turbo Backend**: Local Node.js server with SQLite storage, VAD silence trimming, anti-hallucination sanitization, and streaming sliding-window support for arbitrarily long recordings.
+- **Bounded Long-Recording Backend**: Local Node.js server with SQLite storage, VAD silence trimming and anti-hallucination sanitization. Recordings longer than one piece are cut at pauses into bounded 45 s pieces and joined into one transcript, so the configured model never receives a whole long recording.
 - **Four-Tier Backend Cascade**: Warm daemon → RTX A2000 → Radeon 780M iGPU → CPU. A wedged daemon is capped at 15 s and rejected on any non-200 or `{ ok: false }` reply, so a constrained GPU never leaves the client stuck on "Processing...".
 - **Web Dashboard & PWA**: Clean pitch-black web interface with URW Gothic typography, real-time timer, and direct APK download.
 
@@ -150,6 +150,19 @@ explicit `{ ok: false }` payload rejects that tier immediately and falls through
 to the next one. `POST /api/transcribe` reports the winning `backend` plus the
 per-tier `backendAttempts` history, and a hung `handy` process is killed at
 `HANDY_TIMEOUT_MS` instead of blocking the request forever.
+
+### Long recordings
+
+Speech audio longer than one piece is cut at the quietest pause between 20 and
+40 s from the piece start and never later than 45 s. A window without a pause
+cuts at 45 s and starts the next piece 1.5 s earlier; words repeated across that
+forced seam are removed when the pieces join. A pause seam is never
+deduplicated. Each piece runs through the cascade on its own, so a fallback only
+repeats the failed piece, and the joined text is cleaned once. Recordings that
+fit in one piece stay a single request.
+
+The warm daemon refuses WAV input longer than `WHISPER_MAX_AUDIO_MS` (default
+120 s) with HTTP 413, so an oversized request cannot crash the model process.
 
 ---
 
@@ -301,6 +314,12 @@ host (AMD Ryzen 7 250 + RTX A2000, ONNX CPU provider, 3.8 s utterance):
 | `VOICE_VAULT_SPEAKER_THREADS` | `4` | onnxruntime intra-op threads |
 | `WHISPER_SOCKET` | `/tmp/voice-vault-asr.sock` | Warm ASR daemon unix socket |
 | `WHISPER_SOCKET_TIMEOUT_MS` | `15000` | Daemon cap before falling back to `handy` |
+| `WHISPER_MODEL` | `turbo` | Model for the warm daemon and direct `handy` tiers (production: `bark-3.0-clean-Q8_0`) |
+| `WHISPER_MAX_AUDIO_MS` | `120000` | Warm daemon refuses WAV input longer than this (HTTP 413) |
+| `VOICE_VAULT_PIECE_MAX_MS` | `45000` | Maximum length of one transcribed piece |
+| `VOICE_VAULT_PIECE_WINDOW_START_MS` | `20000` | Start of the pause-search window |
+| `VOICE_VAULT_PIECE_WINDOW_END_MS` | `40000` | End of the pause-search window |
+| `VOICE_VAULT_PIECE_OVERLAP_MS` | `1500` | Overlap before a forced cut |
 | `HANDY_BIN` | `/home/qqp/.local/bin/handy` | Executable used by the direct tiers |
 | `HANDY_DEVICE_INDEX_GPU` | `1` | `handy --list-devices` index of the RTX A2000 |
 | `HANDY_DEVICE_INDEX_IGPU` | `0` | Index of the Radeon 780M iGPU |
