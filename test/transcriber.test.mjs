@@ -49,8 +49,10 @@ const {
   queryHandyDirect,
   defaultTranscribe,
   transcribeAudioFile,
+  pieceCacheKey,
 } = await import("../src/transcriber.mjs");
 const { decodeWav, encodePcm16Wav } = await import("../src/wav.mjs");
+const { cutPieces, resolvePieceOptions } = await import("../src/chunker.mjs");
 
 const ENV_KEYS = [
   "WHISPER_SOCKET",
@@ -693,6 +695,97 @@ test("a piece that exhausts every tier fails the whole transcription with its in
       },
     );
     assert.deepEqual(calls, ["fail-p0", "fail-p1"], "later pieces are not attempted");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Ahead-of-time piece cache (design D3/D4)
+// ---------------------------------------------------------------------------
+
+/** Cache entries keyed exactly like a stream session fills them. */
+function cacheFor(pcm, texts, backend = "cached_backend") {
+  const options = resolvePieceOptions({ sampleRate: PIECE_SR });
+  const pieces = cutPieces(pcm, options);
+  const cache = new Map();
+  pieces.forEach((piece, index) => {
+    cache.set(
+      pieceCacheKey(piece.startSample, piece.endSample, pcm.subarray(piece.startSample, piece.endSample)),
+      { text: texts[index], backend, transcribe_ms: 2, attempts: [] },
+    );
+  });
+  return { cache, pieces };
+}
+
+test("cached piece results are reused instead of calling the backend", async () => {
+  const dir = tempDir("piece-cache-hit");
+  const pcm = flatTone(100);
+  const file = writeSyntheticWav(dir, "cached.wav", pcm);
+  const { cache, pieces } = cacheFor(pcm, ["Alpha.", "Beta.", "Gamma."]);
+  const calls = [];
+  try {
+    const result = await transcribeAudioFile(file, "cached", {
+      speakerGate: false,
+      pieceCache: cache,
+      transcribe: async (wavPath, reqId) => {
+        calls.push(reqId);
+        return { text: "live", transcribe_ms: 1, backend: "daemon_gpu" };
+      },
+    });
+    assert.equal(calls.length, 0, "every piece was transcribed ahead of time");
+    assert.equal(result.pieces, pieces.length);
+    assert.equal(result.text, "Alpha. Beta. Gamma.");
+    assert.deepEqual(result.pieceBackends, pieces.map(() => "cached_backend"));
+    assert.equal(result.transcribeMs, pieces.length * 2);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a cache entry for different audio is ignored", async () => {
+  const dir = tempDir("piece-cache-different");
+  const pcm = flatTone(100);
+  const file = writeSyntheticWav(dir, "different.wav", pcm);
+  // Same bounds, deliberately different samples: the PCM hash must not match.
+  const { cache, pieces } = cacheFor(flatTone(100, 6001), ["Cached one.", "Cached two.", "Cached three."]);
+  const texts = ["Live one.", "Live two.", "Live three."];
+  let call = 0;
+  try {
+    const result = await transcribeAudioFile(file, "different", {
+      speakerGate: false,
+      pieceCache: cache,
+      transcribe: async () => ({ text: texts[call++], transcribe_ms: 1, backend: "daemon_gpu" }),
+    });
+    assert.equal(call, pieces.length, "every piece reached the backend");
+    assert.equal(result.text, "Live one. Live two. Live three.");
+    assert.deepEqual(result.pieceBackends, pieces.map(() => "daemon_gpu"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the single-piece fast path ignores the piece cache", async () => {
+  const dir = tempDir("piece-cache-single");
+  const pcm = speechBurst(20);
+  const file = writeSyntheticWav(dir, "single.wav", pcm);
+  const cache = new Map([[
+    pieceCacheKey(0, pcm.length, pcm),
+    { text: "Cached words.", backend: "cached_backend", transcribe_ms: 2 },
+  ]]);
+  const calls = [];
+  try {
+    const result = await transcribeAudioFile(file, "single", {
+      speakerGate: false,
+      pieceCache: cache,
+      transcribe: async (wavPath, reqId) => {
+        calls.push(reqId);
+        return { text: "Live words.", transcribe_ms: 1, backend: "daemon_gpu" };
+      },
+    });
+    assert.deepEqual(calls, ["single"], "short audio is always one backend request");
+    assert.equal(result.pieces, 1);
+    assert.equal(result.text, "Live words.");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
