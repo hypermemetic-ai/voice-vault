@@ -46,7 +46,7 @@ final class RecordingStore {
             if(!java.util.Arrays.equals(file.readFully(),bytes))throw new IOException("Recording storage failed"); }
         catch(IOException error) { if(out!=null)file.failWrite(out); throw new IOException("Recording storage failed"); }
     }
-    static boolean family(String name) { return name!=null && name.matches("dictation_[0-9]{10,17}\\.(m4a|mp4)"); }
+    static boolean family(String name) { return name!=null && name.matches("dictation_[0-9]{10,17}\\.(m4a|mp4|wav)"); }
     private File directory(String location) {
         if(location.equals("external"))return context.getExternalFilesDir("recordings");
         if(location.equals("private"))return context.getFilesDir();
@@ -79,8 +79,10 @@ final class RecordingStore {
     private static long duration(File file) {
         MediaMetadataRetriever media=new MediaMetadataRetriever();
         try { media.setDataSource(file.getAbsolutePath()); String value=media.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
-            return value==null ? -1 : Long.parseLong(value); }
-        catch(Exception invalid) { return -1; } finally { try { media.release(); }catch(Exception ignored){} }
+            if(value!=null)return Long.parseLong(value); }
+        catch(Exception invalid) { /* Fall through to the canonical WAV header. */ }
+        finally { try { media.release(); }catch(Exception ignored){} }
+        return WavHeader.durationMs(file);
     }
     synchronized RecordingIndex.Entry capture(File file,long time) throws IOException {
         String location="private"; File external=directory("external");

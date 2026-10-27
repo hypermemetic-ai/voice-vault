@@ -3,6 +3,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 import { prepareAudioForTranscription } from "/home/qqp/projects/qq-dictation/src/recognizer.mjs";
 import { decodeWav, encodePcm16Wav } from "./wav.mjs";
 import { cutPieces, resolvePieceOptions } from "./chunker.mjs";
@@ -403,6 +404,21 @@ function mostDegradedBackend(backends) {
   return worst;
 }
 
+/**
+ * Cache key for one bounded piece: its sample bounds plus a hash of its PCM.
+ * Streaming fills this cache ahead of time and the final recording looks it up
+ * again (design D3/D4). Hashing the audio means a result can never be reused
+ * for a different recording or for gated/high-passed audio.
+ *
+ * @param {number} startSample
+ * @param {number} endSample
+ * @param {Int16Array} pcm
+ */
+export function pieceCacheKey(startSample, endSample, pcm) {
+  const bytes = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  return `${startSample}:${endSample}:${crypto.createHash("sha1").update(bytes).digest("hex")}`;
+}
+
 const SEAM_DEDUP_MAX_WORDS = 12;
 const SEAM_WORD_PATTERN = /[\p{L}\p{N}][\p{L}\p{N}'’]*/gu;
 
@@ -477,6 +493,8 @@ async function tryLowFrequencyRescue(rawWavPath, rescueWavPath) {
  * @param {boolean} [options.speakerGate] force the gate on/off
  * @param {object|null} [options.profile] explicit profile (bypasses the database)
  * @param {object} [options.embedder] explicit embedder instance
+ * @param {Map|{get(key: string): object|undefined}} [options.pieceCache]
+ *   results of pieces already transcribed while the recording streamed
  */
 export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now()}`, options = {}) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "voice-vault-"));
@@ -631,20 +649,29 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
     let joined = "";
     let pieceTranscribeMs = 0;
 
+    const pieceCache = options.pieceCache;
     for (let index = 0; index < pieces.length; index += 1) {
       const piece = pieces[index];
-      const pieceWavPath = path.join(tmpDir, `piece-${index}.wav`);
       const piecePcm = decodedAudio.samples.subarray(piece.startSample, piece.endSample);
-      fs.writeFileSync(pieceWavPath, encodePcm16Wav(piecePcm, pieceOptions.sampleRate));
+      const cached = pieceCache && typeof pieceCache.get === "function"
+        ? pieceCache.get(pieceCacheKey(piece.startSample, piece.endSample, piecePcm))
+        : null;
 
       let resp;
-      try {
-        resp = await transcribe(pieceWavPath, `${reqId}-p${index}`);
-      } catch (error) {
-        // A piece that exhausts every tier fails the whole transcription; the
-        // index identifies which piece without changing the failure shape.
-        if (error && typeof error === "object") error.pieceIndex = index;
-        throw error;
+      if (cached) {
+        // Transcribed ahead of time while the recording was still streaming.
+        resp = cached;
+      } else {
+        const pieceWavPath = path.join(tmpDir, `piece-${index}.wav`);
+        fs.writeFileSync(pieceWavPath, encodePcm16Wav(piecePcm, pieceOptions.sampleRate));
+        try {
+          resp = await transcribe(pieceWavPath, `${reqId}-p${index}`);
+        } catch (error) {
+          // A piece that exhausts every tier fails the whole transcription; the
+          // index identifies which piece without changing the failure shape.
+          if (error && typeof error === "object") error.pieceIndex = index;
+          throw error;
+        }
       }
 
       const backend = resp?.backend || "daemon_gpu";

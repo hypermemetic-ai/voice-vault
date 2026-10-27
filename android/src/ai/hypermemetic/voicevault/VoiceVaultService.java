@@ -10,6 +10,8 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.media.AudioFormat;
+import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Handler;
@@ -24,6 +26,8 @@ import android.widget.Toast;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -49,7 +53,18 @@ public class VoiceVaultService extends Service {
     public static String getActiveRecordingId() { return sCaptureId; }
     public static String getRecoveryId() { return sRecoveryId; }
 
-    private MediaRecorder mRecorder = null;
+    private static final int SAMPLE_RATE = 16000;
+    private static final int CAPTURE_BUFFER_BYTES = 3200; // 100 ms of 16 kHz mono PCM16
+    private static final long STREAM_FLUSH_TIMEOUT_MS = 10000L;
+
+    private AudioRecord mRecorder = null;
+    private Thread mCaptureThread = null;
+    private FileOutputStream mCaptureOut = null;
+    private volatile boolean mCaptureRunning = false;
+    private volatile long mPcmBytes = 0;
+    private volatile Exception mCaptureError = null;
+    private boolean mWavFinalized = false;
+    private RecordingStreamer mStreamer = null;
     private File mCurrentAudioFile = null;
     private PowerManager.WakeLock mWakeLock = null;
     private Handler mHandler = null;
@@ -252,7 +267,7 @@ public class VoiceVaultService extends Service {
             if (dir == null) dir = getFilesDir();
             dir.mkdirs();
 
-            mCurrentAudioFile = new File(dir, "dictation_" + sRecordingStartTime + ".m4a");
+            mCurrentAudioFile = new File(dir, "dictation_" + sRecordingStartTime + ".wav");
             try {
                 mRecordingStore=RecordingStore.get(this);
                 synchronized(mRecordingStore) {
@@ -262,20 +277,23 @@ public class VoiceVaultService extends Service {
                 failDictation(sRecordingStartTime,"Recording storage failed — audio is not safely saved","storage_failure");return;
             }
 
-            mRecorder = new MediaRecorder();
             // VOICE_RECOGNITION activates the Pixel's multi-microphone
             // beamforming / target-voice capture path, which steers a beam at
             // the talker in front of the device instead of picking up the whole
             // room the way AudioSource.MIC does. This is the client-side half of
             // the two-part speaker-rejection pipeline (server voiceprint gate is
             // the other half).
-            mRecorder.setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION);
-            mRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
-            mRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
-            mRecorder.setAudioEncodingBitRate(96000);
-            mRecorder.setAudioSamplingRate(16000);
-            mRecorder.setOutputFile(mCurrentAudioFile.getAbsolutePath());
-            mRecorder.prepare();
+            int minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            if (minBuffer <= 0) throw new IllegalStateException();
+            mRecorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+                    Math.max(minBuffer * 2, CAPTURE_BUFFER_BYTES * 2));
+            if (mRecorder.getState() != AudioRecord.STATE_INITIALIZED) throw new IllegalStateException();
+            mPcmBytes = 0;
+            mCaptureError = null;
+            mWavFinalized = false;
+            mCaptureOut = new FileOutputStream(mCurrentAudioFile, false);
+            mCaptureOut.write(WavHeader.bytes(0));
 
             sIsRecording = true;
             sIsProcessing = false;
@@ -294,8 +312,15 @@ public class VoiceVaultService extends Service {
                 if (generation != mGeneration || !sIsRecording || mRecorder == null) return;
                 mRecorderStartRunnable = null;
                 try {
-                    mRecorder.start();
+                    mRecorder.startRecording();
                     mRecorderStarted = true;
+                    mCaptureRunning = true;
+                    AudioRecord recorder = mRecorder;
+                    FileOutputStream out = mCaptureOut;
+                    mCaptureThread = new Thread(() -> captureLoop(recorder, out, generation), "VoiceVaultCapture");
+                    mCaptureThread.start();
+                    mStreamer = new RecordingStreamer(VoiceVaultApi.streamUrl(sCaptureId), mCurrentAudioFile);
+                    mStreamer.start();
                 } catch (Exception ex) {
                     failDictation(sRecordingStartTime, "Microphone failed — try again");
                 }
@@ -327,6 +352,45 @@ public class VoiceVaultService extends Service {
         }
     }
 
+    /** Capture thread: append PCM to the durable WAV and publish the byte count. */
+    private void captureLoop(AudioRecord recorder, FileOutputStream out, int generation) {
+        byte[] buffer = new byte[CAPTURE_BUFFER_BYTES];
+        while (mCaptureRunning && generation == mGeneration) {
+            int read;
+            try {
+                read = recorder.read(buffer, 0, buffer.length);
+            } catch (Exception error) {
+                mCaptureError = error;
+                break;
+            }
+            if (read < 0) {
+                mCaptureError = new IOException("Microphone read failed");
+                break;
+            }
+            if (read == 0) {
+                Thread.yield();
+                continue;
+            }
+            int count = read & ~1; // PCM16 frames stay whole and stream offsets stay even
+            try {
+                out.write(buffer, 0, count);
+                mPcmBytes += count;
+                RecordingStreamer streamer = mStreamer;
+                if (streamer != null) streamer.written(mPcmBytes);
+            } catch (Exception error) {
+                mCaptureError = error;
+                break;
+            }
+        }
+        if (mCaptureError != null) {
+            mHandler.post(() -> {
+                if (generation == mGeneration && sIsRecording) {
+                    failDictation(sRecordingStartTime, "Recording storage failed — audio is not safely saved", "storage_failure");
+                }
+            });
+        }
+    }
+
     private void stopAndTranscribe() {
         if (!sIsRecording) return;
         sIsRecording = false;
@@ -336,12 +400,15 @@ public class VoiceVaultService extends Service {
         final long recordingId = sRecordingStartTime;
         final int generation = mGeneration;
 
+        final long pcmBytes;
         try {
             if (mRecorder == null || !mRecorderStarted) throw new IllegalStateException();
-            mRecorder.stop();
-            mRecorderStarted = false;
+            stopCapture();
+            if (mCaptureError != null || mPcmBytes <= 0) throw new IllegalStateException();
+            pcmBytes = mPcmBytes;
+            WavHeader.finish(mCurrentAudioFile, pcmBytes);
+            mWavFinalized = true;
         } catch (Exception e) {
-            mRecorderStarted = false;
             failDictation(recordingId, "Recording too short or failed — try again");
             return;
         } finally {
@@ -368,6 +435,8 @@ public class VoiceVaultService extends Service {
 
         final File audioFile = mCurrentAudioFile;
         final RecordingIndex.Entry ownedEntry=mRecordingEntry;
+        final RecordingStreamer streamer = mStreamer;
+        if (streamer != null) streamer.stop(pcmBytes);
         final DictationUpload upload = new DictationUpload();
         mUpload = upload;
         mProcessingTimeoutRunnable = () -> {
@@ -378,20 +447,25 @@ public class VoiceVaultService extends Service {
         mHandler.postDelayed(mProcessingTimeoutRunnable, PROCESSING_TIMEOUT_MS);
         mExecutor.execute(() -> {
             try {
-                JSONObject json = new JSONObject(upload.post(VoiceVaultApi.TRANSCRIBE_URL, audioFile, durationMs, ownedEntry.id));
-                if (!json.optBoolean("ok", false)) throw new DictationUpload.Failure("Server rejected transcription");
-                if (!(json.opt("text") instanceof String)) throw new DictationUpload.Failure("Invalid server response");
-                String text = json.getString("text");
-                mHandler.post(() -> {
-                    if (generation != mGeneration || !sIsProcessing) return;
+                JSONObject json = null;
+                boolean streamed = streamer != null && streamer.flush(STREAM_FLUSH_TIMEOUT_MS);
+                if (streamer != null && !streamed) {
+                    streamer.cancel();
+                    mExecutor.execute(streamer::disconnect);
+                }
+                if (streamed) {
                     try {
-                        String state=json.optBoolean("rejected",false) ? "speaker_rejected" : text.trim().isEmpty() ? "no_speech" : "transcribed";
-                        if(!mRecordingStore.index.finish(mRecordingEntry.id,mRecordingEntry.attempt,state,"",text,json.optString("id",mRecordingEntry.id)))return;
-                    }catch(Exception storage){failDictation(recordingId,"Recording storage failed — original retained","storage_failure");return;}
-                    mUpload = null;
-                    onTranscriptionSuccess(text, durationMs, recordingId);
-                    if (json.optBoolean("rejected", false)) FloatingPillOverlay.showSuccess("Other speaker rejected");
-                });
+                        String sha256 = DictationUpload.sha256(audioFile);
+                        DictationUpload.Response finished = upload.finish(VoiceVaultApi.finishUrl(ownedEntry.id), pcmBytes, sha256, durationMs);
+                        if (finished.status == 200) json = new JSONObject(finished.body);
+                    } catch (Exception finishFailure) {
+                        // Finishing is best effort; the whole-WAV upload below is authoritative.
+                    }
+                }
+                if (json == null) {
+                    json = new JSONObject(upload.post(VoiceVaultApi.TRANSCRIBE_URL, audioFile, durationMs, ownedEntry.id));
+                }
+                acceptTranscription(json, generation, recordingId, durationMs);
             } catch (Exception e) {
                 final String feedback = DictationUpload.feedback(e);
                 mHandler.post(() -> {
@@ -400,6 +474,22 @@ public class VoiceVaultService extends Service {
                     }
                 });
             }
+        });
+    }
+
+    private void acceptTranscription(JSONObject json, int generation, long recordingId, long durationMs) throws Exception {
+        if (!json.optBoolean("ok", false)) throw new DictationUpload.Failure("Server rejected transcription");
+        if (!(json.opt("text") instanceof String)) throw new DictationUpload.Failure("Invalid server response");
+        String text = json.getString("text");
+        mHandler.post(() -> {
+            if (generation != mGeneration || !sIsProcessing) return;
+            try {
+                String state=json.optBoolean("rejected",false) ? "speaker_rejected" : text.trim().isEmpty() ? "no_speech" : "transcribed";
+                if(!mRecordingStore.index.finish(mRecordingEntry.id,mRecordingEntry.attempt,state,"",text,json.optString("id",mRecordingEntry.id)))return;
+            }catch(Exception storage){failDictation(recordingId,"Recording storage failed — original retained","storage_failure");return;}
+            mUpload = null;
+            onTranscriptionSuccess(text, durationMs, recordingId);
+            if (json.optBoolean("rejected", false)) FloatingPillOverlay.showSuccess("Other speaker rejected");
         });
     }
 
@@ -500,15 +590,47 @@ public class VoiceVaultService extends Service {
         mTimerRunnable = null;
     }
 
-    private void releaseRecorder() {
-        MediaRecorder recorder = mRecorder;
-        mRecorder = null;
-        boolean started = mRecorderStarted;
-        mRecorderStarted = false;
-        if (recorder == null) return;
-        if (started) {
+    /** Stop capture first so the header patch and streaming see a complete file. */
+    private void stopCapture() {
+        mCaptureRunning = false;
+        AudioRecord recorder = mRecorder;
+        if (recorder != null) {
             try { recorder.stop(); } catch (Exception ignored) {}
         }
+        Thread thread = mCaptureThread;
+        mCaptureThread = null;
+        if (thread != null && thread != Thread.currentThread()) {
+            try { thread.join(2000); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        }
+        mRecorderStarted = false;
+        FileOutputStream out = mCaptureOut;
+        mCaptureOut = null;
+        if (out != null) {
+            try { out.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private void releaseRecorder() {
+        AudioRecord recorder = mRecorder;
+        mRecorder = null;
+        mCaptureRunning = false;
+        Thread thread = mCaptureThread;
+        mCaptureThread = null;
+        if (thread != null && thread != Thread.currentThread()) {
+            try { thread.join(2000); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        }
+        FileOutputStream out = mCaptureOut;
+        mCaptureOut = null;
+        if (out != null) {
+            try { out.close(); } catch (Exception ignored) {}
+        }
+        mRecorderStarted = false;
+        if (!mWavFinalized && mCurrentAudioFile != null && mPcmBytes > 0) {
+            // Interruption or failure still leaves a well-formed local WAV.
+            try { WavHeader.finish(mCurrentAudioFile, mPcmBytes); mWavFinalized = true; } catch (Exception ignored) {}
+        }
+        if (recorder == null) return;
+        try { recorder.stop(); } catch (Exception ignored) {}
         try { recorder.release(); } catch (Exception ignored) {}
     }
 
@@ -518,6 +640,15 @@ public class VoiceVaultService extends Service {
         if (upload != null) {
             upload.cancel();
             mExecutor.execute(upload::disconnect);
+        }
+    }
+
+    private void cancelStreamer() {
+        RecordingStreamer streamer = mStreamer;
+        mStreamer = null;
+        if (streamer != null) {
+            streamer.cancel();
+            mExecutor.execute(streamer::disconnect);
         }
     }
 
@@ -536,6 +667,7 @@ public class VoiceVaultService extends Service {
         sIsProcessing = false;
         VoiceVaultKeyService.onTranscriptionFinished(recordingId, null);
         cancelUpload();
+        cancelStreamer();
         // Only fixed feedback categories are logged, never paths or response bodies.
         Log.e(TAG, feedback);
         FloatingPillOverlay.showSuccess(feedback);
@@ -548,7 +680,7 @@ public class VoiceVaultService extends Service {
         boolean capture=sIsRecording;
         mGeneration++;
         VoiceVaultKeyService.onTranscriptionFinished(sRecordingStartTime,null);
-        sIsRecording=false;sIsProcessing=false;cancelTimers();releaseRecorder();cancelUpload();
+        sIsRecording=false;sIsProcessing=false;cancelTimers();cancelStreamer();releaseRecorder();cancelUpload();
         try {
             if(mRecordingEntry!=null && mRecordingStore!=null) {
                 mRecordingStore.index.interrupt(mRecordingEntry.id,"canceled");
@@ -566,6 +698,7 @@ public class VoiceVaultService extends Service {
         sIsRecording = false;
         sIsProcessing = false;
         cancelTimers();
+        cancelStreamer();
         releaseRecorder();
         if (mWakeLock != null) {
             if (mWakeLock.isHeld()) mWakeLock.release();

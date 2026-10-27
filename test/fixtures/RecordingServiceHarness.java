@@ -1,6 +1,9 @@
 package ai.hypermemetic.voicevault;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
@@ -10,10 +13,20 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
     private static final String TAG = "test", BROADCAST_STATE_CHANGE = "state";
     private static final int NOTIFICATION_ID = 1;
     private static final long PROCESSING_TIMEOUT_MS = 600000L;
+    private static final int SAMPLE_RATE = 16000;
+    private static final int CAPTURE_BUFFER_BYTES = 3200;
+    private static final long STREAM_FLUSH_TIMEOUT_MS = 10000L;
     private static boolean sIsRecording, sIsProcessing;
     private static String sCaptureId="",sRecoveryId="";
     private static long sRecordingStartTime;
-    private MediaRecorder mRecorder;
+    private AudioRecord mRecorder;
+    private Thread mCaptureThread;
+    private FileOutputStream mCaptureOut;
+    private volatile boolean mCaptureRunning;
+    private volatile long mPcmBytes;
+    private volatile Exception mCaptureError;
+    private boolean mWavFinalized;
+    private RecordingStreamer mStreamer;
     private File mCurrentAudioFile;
     private PowerManager.WakeLock mWakeLock;
     private final Handler mHandler = new Handler();
@@ -49,16 +62,22 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
     // PRODUCTION_METHODS
 
     private void recording() {
+        AudioRecord.remaining = 1;
         startRecording();
         check(sIsRecording, "recording armed");
         mHandler.fire(mRecorderStartRunnable);
         check(mRecorderStarted, "microphone started");
+        long deadline = System.currentTimeMillis() + 2000;
+        while (mPcmBytes == 0 && System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(5); } catch (InterruptedException ignored) {}
+        }
+        check(mPcmBytes > 0, "synthetic audio captured");
     }
     private void processing() {
         recording();
         stopAndTranscribe();
         check(sIsProcessing && !sIsRecording, "processing");
-        check(mRecorder == null && MediaRecorder.releases == 1, "recorder released before upload");
+        check(mRecorder == null && AudioRecord.releases == 1, "recorder released before upload");
         check(mHandler.delay(mProcessingTimeoutRunnable) == 600000L, "absolute ten-minute deadline");
     }
     private void idle() {
@@ -77,9 +96,9 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
     private void scenario(String name) {
         switch (name) {
         case "storage-intent":
-            RecordingStore.current.failCapture=true;startRecording();idle();check(MediaRecorder.starts==0 && mExecutor.work.isEmpty(),"no recorder/upload without intent");break;
+            RecordingStore.current.failCapture=true;startRecording();idle();check(AudioRecord.starts==0 && mExecutor.work.isEmpty(),"no recorder/upload without intent");break;
         case "storage-finalize":
-            recording();RecordingStore.current.failFinalize=true;stopAndTranscribe();idle();check(mCurrentAudioFile.exists() && mExecutor.work.isEmpty(),"original retained without upload");break;
+            recording();RecordingStore.current.failFinalize=true;stopAndTranscribe();idle();check(mCurrentAudioFile.exists() && DictationUpload.uploads==0,"original retained without upload");break;
         case "recover-busy":
             recording();recoverRecording("missing");check(sIsRecording && mExecutor.work.isEmpty(),"active dictation owns workflow");cancelRecording();break;
         case "recover-repeat":
@@ -98,31 +117,38 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
             check(mRecordingStore.index.get(recovery.id).capturedAt==123,"capture time preserved");break;
         }
         case "prepare":
-            MediaRecorder.failPrepare = true;
+            AudioRecord.failPrepare = true;
             startRecording(); idle();
-            check(MediaRecorder.releases == 1 && mExecutor.work.isEmpty(), "prepare release/no upload");
+            check(AudioRecord.releases == 1 && mExecutor.work.isEmpty(), "prepare release/no upload");
             break;
         case "start":
-            MediaRecorder.failStart = true;
+            AudioRecord.failStart = true;
             startRecording(); mHandler.fire(mRecorderStartRunnable); idle();
-            check(MediaRecorder.releases == 1 && mExecutor.work.isEmpty(), "start release/no upload");
+            check(AudioRecord.releases == 1 && mExecutor.work.isEmpty(), "start release/no upload");
             break;
         case "early-stop":
             startRecording();
             Runnable pending = mRecorderStartRunnable;
             stopAndTranscribe(); idle(); pending.run();
-            check(MediaRecorder.starts == 0 && mExecutor.work.isEmpty(), "no delayed start/upload");
+            check(AudioRecord.starts == 0 && mExecutor.work.isEmpty(), "no delayed start/upload");
             break;
-        case "stop":
-            recording(); MediaRecorder.failStop = true;
-            stopAndTranscribe(); idle();
-            check(MediaRecorder.releases == 1 && mExecutor.work.isEmpty(), "stop release/no upload");
+        case "capture-failure":
+            AudioRecord.failRead = true;
+            startRecording(); mHandler.fire(mRecorderStartRunnable);
+            long captureDeadline = System.currentTimeMillis() + 2000;
+            while (mCaptureError == null && System.currentTimeMillis() < captureDeadline) {
+                try { Thread.sleep(5); } catch (InterruptedException ignored) {}
+            }
+            check(mCaptureError != null, "capture failure observed");
+            stopAndTranscribe(); idle(); mHandler.flush();
+            check(AudioRecord.releases == 1 && DictationUpload.uploads == 0, "capture failure release/no upload");
             break;
         case "stale-start":
             startRecording(); Runnable stale = mRecorderStartRunnable;
-            cancelRecording(); idle(); startRecording();
-            stale.run(); check(MediaRecorder.starts == 0, "stale start ignored");
-            mHandler.fire(mRecorderStartRunnable); check(MediaRecorder.starts == 1, "new start works");
+            cancelRecording(); idle();
+            startRecording();
+            stale.run(); check(AudioRecord.starts == 0, "stale start ignored");
+            mHandler.fire(mRecorderStartRunnable); check(AudioRecord.starts == 1, "new start works");
             cancelRecording(); idle();
             break;
         case "timeout":
@@ -143,12 +169,23 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
             JSONObject.response = "badjson";
             worker.run(); mHandler.flush();
             check(successes == 0, "late error ignored");
-            mExecutor.work.get(1).run(); check(canceled.disconnected, "disconnect scheduled off UI");
+            for (int index = 1; index < mExecutor.work.size(); index++) mExecutor.work.get(index).run();
+            check(canceled.disconnected, "disconnect scheduled off UI");
             break;
         case "destroy":
             recording();
             onDestroy(); idle();
-            check(MediaRecorder.releases == 1 && mExecutor.closed, "destroy releases recorder and shuts workers");
+            check(AudioRecord.releases == 1 && mExecutor.closed, "destroy releases recorder and shuts workers");
+            break;
+        case "fallback":
+            processing(); RecordingStreamer.complete = false;
+            mExecutor.work.get(0).run(); mHandler.flush();
+            check(successes == 1 && DictationUpload.uploads == 1 && DictationUpload.finishes == 0, "incomplete stream falls back to the WAV upload");
+            break;
+        case "finish-rejected":
+            processing(); DictationUpload.finishStatus = 409;
+            mExecutor.work.get(0).run(); mHandler.flush();
+            check(successes == 1 && DictationUpload.uploads == 1 && DictationUpload.finishes == 1, "non-200 finish falls back to the WAV upload");
             break;
         default:
             processing(); Runnable timeout = mProcessingTimeoutRunnable;
@@ -156,6 +193,7 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
             mExecutor.work.get(0).run(); mHandler.flush();
             if (name.equals("success")) {
                 check(successes == 1 && !sIsProcessing, "success completed");
+                check(DictationUpload.finishes == 1 && DictationUpload.uploads == 0, "verified finish accepted without upload");
                 check(mHandler.delayed.isEmpty(), "success deadline removed");
                 timeout.run(); check(successes == 1 && stopped == 1, "old deadline inert");
             } else { idle(); check(successes == 0, "error not accepted"); }
@@ -198,7 +236,11 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
         static String completionText;static int completions;
         static void onTranscriptionFinished(long id, String text) { completionText = text;completions++; }
     }
-    static final class VoiceVaultApi { static final String BASE_URL="http://synthetic.invalid",TRANSCRIBE_URL = BASE_URL+"/api/transcribe"; }
+    static final class VoiceVaultApi {
+        static final String BASE_URL="http://synthetic.invalid",TRANSCRIBE_URL = BASE_URL+"/api/transcribe";
+        static String streamUrl(String id){return BASE_URL+"/api/recording/"+id+"/stream";}
+        static String finishUrl(String id){return BASE_URL+"/api/recording/"+id+"/stream/finish";}
+    }
     static final class JSONObject {
         static String response = "success";
         final String body;
@@ -209,9 +251,16 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
         String getString(String name) { return (String) opt(name); }
     }
     static final class DictationUpload {
+        static int uploads, finishes, finishStatus = 200;
         boolean canceled, disconnected;
         static final class Failure extends Exception { String recordingId="";boolean audioAvailable;Failure(String message) { super(message); } }
-        String post(String endpoint, File audio, long duration,String id) { return "synthetic response"; }
+        static final class Response {
+            final int status; final String body;
+            Response(int status,String body){this.status=status;this.body=body;}
+        }
+        String post(String endpoint, File audio, long duration,String id) { uploads++; return "synthetic response"; }
+        Response finish(String endpoint, long bytes, String sha256, long duration) { finishes++; return new Response(finishStatus, JSONObject.response); }
+        static String sha256(File file) { return "synthetic-sha256"; }
         void cancel() { canceled = true; } void disconnect() { disconnected = true; }
         static String category(Exception error){return "server_error";}
         static String feedback(Exception error) { return "synthetic failure"; }
@@ -242,18 +291,48 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
         }
     }
     static final class MediaRecorder {
-        static boolean failPrepare, failStart, failStop;
-        static int starts, releases;
         static final class AudioSource { static final int VOICE_RECOGNITION = 1; }
-        static final class OutputFormat { static final int MPEG_4 = 1; }
-        static final class AudioEncoder { static final int AAC = 1; }
-        void setAudioSource(int source) {} void setOutputFormat(int format) {}
-        void setAudioEncoder(int encoder) {} void setAudioEncodingBitRate(int rate) {}
-        String output;void setAudioSamplingRate(int rate) {} void setOutputFile(String file) {output=file;}
-        void prepare() { if (failPrepare) throw new IllegalStateException(); }
-        void start() { if (failStart) throw new IllegalStateException(); starts++; }
-        void stop() { if (failStop) throw new IllegalStateException();try{Files.writeString(new File(output).toPath(),"synthetic audio");}catch(Exception e){throw new IllegalStateException();} }
+    }
+    static final class AudioFormat { static final int CHANNEL_IN_MONO = 16, ENCODING_PCM_16BIT = 2; }
+    static final class AudioRecord {
+        static boolean failPrepare, failStart, failRead;
+        static int starts, releases, stops;
+        static volatile int remaining = 1;
+        static final int STATE_INITIALIZED = 1;
+        AudioRecord(int source, int rate, int channels, int encoding, int buffer) {}
+        static int getMinBufferSize(int rate, int channels, int encoding) { return 3200; }
+        int getState() { return failPrepare ? 0 : STATE_INITIALIZED; }
+        void startRecording() { if (failStart) throw new IllegalStateException(); starts++; }
+        int read(byte[] buffer, int offset, int length) {
+            if (failRead) return -1;
+            if (remaining <= 0) return 0;
+            int count = Math.min(3200, length);
+            for (int i = 0; i < count; i++) buffer[offset + i] = (byte) (i & 0x7f);
+            remaining--;
+            return count;
+        }
+        void stop() { stops++; }
         void release() { releases++; }
+    }
+    static final class WavHeader {
+        static final int SIZE = 44;
+        static byte[] bytes(long pcmBytes) { return new byte[SIZE]; }
+        static void finish(File file, long pcmBytes) throws java.io.IOException {
+            try (RandomAccessFile out = new RandomAccessFile(file, "rw")) {
+                out.seek(0); out.write(bytes(pcmBytes)); out.setLength(SIZE + pcmBytes);
+            }
+        }
+    }
+    static final class RecordingStreamer {
+        static boolean complete = true;
+        boolean canceled, disconnected, stopped, started;
+        RecordingStreamer(String endpoint, File file) {}
+        void start() { started = true; }
+        void written(long pcmBytes) {}
+        void stop(long pcmBytes) { stopped = true; }
+        boolean flush(long timeoutMs) { return complete; }
+        void cancel() { canceled = true; }
+        void disconnect() { disconnected = true; }
     }
     static final class Workers {
         final List<Runnable> work = new ArrayList<>();
@@ -264,16 +343,23 @@ public final class RecordingServiceHarness extends RecordingServiceHarnessBase {
     static final class Handler {
         final List<Runnable> posted = new ArrayList<>(), delayed = new ArrayList<>();
         final List<Long> delays = new ArrayList<>();
-        void post(Runnable runnable) { posted.add(runnable); }
-        void postDelayed(Runnable runnable, long duration) { delayed.add(runnable); delays.add(duration); }
-        long delay(Runnable runnable) { return delays.get(delayed.indexOf(runnable)); }
-        void removeCallbacks(Runnable runnable) {
+        synchronized void post(Runnable runnable) { posted.add(runnable); }
+        synchronized void postDelayed(Runnable runnable, long duration) { delayed.add(runnable); delays.add(duration); }
+        synchronized long delay(Runnable runnable) { return delays.get(delayed.indexOf(runnable)); }
+        synchronized void removeCallbacks(Runnable runnable) {
             int index = delayed.indexOf(runnable);
             if (index >= 0) { delayed.remove(index); delays.remove(index); }
             posted.remove(runnable);
         }
         void fire(Runnable runnable) { removeCallbacks(runnable); runnable.run(); }
-        void flush() { while (!posted.isEmpty()) posted.remove(0).run(); }
+        void flush() {
+            while (true) {
+                Runnable next;
+                synchronized (this) { next = posted.isEmpty() ? null : posted.remove(0); }
+                if (next == null) return;
+                next.run();
+            }
+        }
     }
 }
 

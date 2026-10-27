@@ -26,7 +26,9 @@ public final class DictationUploadHarness {
         byte[] synthetic = new byte[20000];
         Arrays.fill(synthetic, (byte) 42);
         File file = File.createTempFile("vv-synthetic-upload-", ".m4a");
+        File wav = File.createTempFile("vv-synthetic-upload-", ".wav");
         Files.write(file.toPath(), synthetic);
+        Files.write(wav.toPath(), synthetic);
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         ExecutorService executor = Executors.newCachedThreadPool();
         server.setExecutor(executor);
@@ -37,6 +39,34 @@ public final class DictationUploadHarness {
             check("audio/mp4".equals(exchange.getRequestHeaders().getFirst("Content-Type")), "content type");
             check("1234".equals(exchange.getRequestHeaders().getFirst("X-Duration-Ms")), "duration header");
             byte[] body = "{\"ok\":true,\"text\":\"synthetic\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.createContext("/wav", exchange -> {
+            check(Arrays.equals(exchange.getRequestBody().readAllBytes(), synthetic), "uploaded WAV bytes");
+            check("audio/wav".equals(exchange.getRequestHeaders().getFirst("Content-Type")), "WAV content type");
+            byte[] body = "{\"ok\":true,\"text\":\"synthetic wav\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.createContext("/stream", exchange -> {
+            check("application/octet-stream".equals(exchange.getRequestHeaders().getFirst("Content-Type")), "PCM content type");
+            check(Arrays.equals(exchange.getRequestBody().readAllBytes(), new byte[]{1,2,3,4}), "PCM body");
+            byte[] body = "{\"ok\":true,\"received\":4}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.createContext("/finish", exchange -> {
+            String request = new String(exchange.getRequestBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            check("application/json".equals(exchange.getRequestHeaders().getFirst("Content-Type")), "finish content type");
+            check(request.contains("\"bytes\":4"), "finish bytes");
+            check(request.contains("\"sha256\":\"synthetic-sha\""), "finish hash");
+            check(request.contains("\"durationMs\":1234"), "finish duration");
+            check(request.contains("\"device\":\"" + DictationUpload.DEVICE + "\""), "finish device");
+            byte[] body = "{\"ok\":true,\"text\":\"synthetic finish\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, body.length);
             exchange.getResponseBody().write(body);
             exchange.close();
@@ -64,6 +94,12 @@ public final class DictationUploadHarness {
         String base = "http://127.0.0.1:" + server.getAddress().getPort();
         try {
             check(new DictationUpload().post(base + "/success", file, 1234).contains("synthetic"), "success response");
+            check(new DictationUpload().post(base + "/wav", wav, 1234).contains("synthetic wav"), "WAV content type");
+            DictationUpload.Response appended = new DictationUpload().append(base + "/stream?offset=0", new byte[]{1,2,3,4});
+            check(appended.status == 200 && appended.body.contains("\"received\":4"), "PCM append response");
+            DictationUpload.Response ended = new DictationUpload().finish(base + "/finish", 4, "synthetic-sha", 1234);
+            check(ended.status == 200 && ended.body.contains("synthetic finish"), "finish response");
+            check(DictationUpload.sha256(wav).matches("[0-9a-f]{64}"), "canonical WAV hash");
             check(requests.get() == 1, "one request");
             fails(() -> new DictationUpload().post(base + "/error", file, 1234), "HTTP 503");
             fails(() -> new DictationUpload().post(base + "/large", file, 1234), "Invalid server response");
@@ -81,6 +117,7 @@ public final class DictationUploadHarness {
             server.stop(0);
             executor.shutdownNow();
             file.delete();
+            wav.delete();
         }
     }
 }

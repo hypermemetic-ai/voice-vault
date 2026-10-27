@@ -21,6 +21,8 @@ public final class VoiceVaultApi {
 
     public static final String BASE_URL = "https://qq-box.tail580136.ts.net:3443";
     public static final String TRANSCRIBE_URL = BASE_URL + "/api/transcribe";
+    public static String streamUrl(String id) { return BASE_URL + "/api/recording/" + id + "/stream"; }
+    public static String finishUrl(String id) { return BASE_URL + "/api/recording/" + id + "/stream/finish"; }
     public static final String HISTORY_URL = BASE_URL + "/api/history?limit=50";
     public static final String PROFILE_URL = BASE_URL + "/api/profile";
     public static final String PROFILE_STATUS_URL = BASE_URL + "/api/profile/status";

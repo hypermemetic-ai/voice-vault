@@ -5,8 +5,16 @@ import crypto from "node:crypto";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as recordingDb from "./db.mjs";
-import { transcribeAudioFile, convertToWav } from "./transcriber.mjs";
+import { transcribeAudioFile, convertToWav, defaultTranscribe } from "./transcriber.mjs";
 import { decodeWav, encodePcm16Wav } from "./wav.mjs";
+import {
+  MAX_STREAM_APPEND,
+  createStreamSession,
+  isStreamFileName,
+  streamFileName,
+  sweepStreamSessions,
+  wavSha256,
+} from "./stream-session.mjs";
 import {
   MAX_ENROLL_SAMPLES,
   MIN_ENROLL_SAMPLE_MS,
@@ -367,6 +375,39 @@ export function createAppServer(options = {}) {
     else archiveWaiters.push(resolve);
   });
 
+  // Streamed-recording sessions (design D2-D7). Their PCM lives in the intake
+  // folder: staging when configured, the archive otherwise.
+  const streamDir = stagingDir || rawDir;
+  const streamTranscribe = options.streamTranscribe || defaultTranscribe;
+  const streamSessions = new Map();
+  const newStreamSession = id => createStreamSession({
+    id, dir: streamDir, transcribe: streamTranscribe, maxBytes: MAX_UPLOAD,
+  });
+  // A session file may outlive the process that created it; adopt it lazily.
+  const openStreamSession = id => {
+    const live = streamSessions.get(id);
+    if (live) return live;
+    try {
+      const stat = files.lstatSync(path.join(streamDir, streamFileName(id)));
+      if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    } catch { return null; }
+    const session = newStreamSession(id);
+    streamSessions.set(id, session);
+    return session;
+  };
+  // Take a session out of routing so no append can touch it again. The file is
+  // removed when the object is disposed, after its cache has been used.
+  const takeStreamSession = id => {
+    const session = streamSessions.get(id);
+    if (session) streamSessions.delete(id);
+    return session;
+  };
+  const sweepStreams = () => {
+    for (const file of sweepStreamSessions(streamDir, streamSessions)) {
+      console.log(`Removed abandoned stream session ${path.basename(file)}`);
+    }
+  };
+
   // Staging never accumulates: archive leftovers at start and periodically,
   // and drop abandoned intake temporaries.
   const ABANDONED_PART_MS = 60 * 60 * 1000;
@@ -376,6 +417,7 @@ export function createAppServer(options = {}) {
     try { entries = files.readdirSync(stagingDir); } catch { return; }
     const now = Date.now();
     for (const name of entries) {
+      if (isStreamFileName(name)) continue; // owned by a stream session, aged out by sweepStreams
       if (name.endsWith(".part")) {
         const file = path.join(stagingDir, name);
         try {
@@ -415,7 +457,7 @@ export function createAppServer(options = {}) {
       { ok: false, id: rec.id, status: rec.status, errorCategory: rec.error_category || "busy",
         audioAvailable: available(rec), saved: available(rec) });
   };
-  const processRecording = async (res, rec) => {
+  const processRecording = async (res, rec, streamSession = null) => {
     let claimed;
     try { claimed = store.claimRecording(rec.id); }
     catch (error) {
@@ -423,9 +465,20 @@ export function createAppServer(options = {}) {
       enqueueArchive(rec.id); return;
     }
     if (!claimed) { respondExisting(res, store.getRecording(rec.id)); return; }
+    // Any live session for this identity contributes its cache, whichever
+    // route is draining it; an explicit one was already taken out of routing.
+    const session = streamSession || takeStreamSession(claimed.id);
     liveAttempts.add(claimed.id);
     try {
-      const result = await runTranscription(locate(claimed), claimed.id, options.transcribeOptions);
+      // Wait for the last piece transcribed while streaming, then let the
+      // recording's own piece loop reuse everything already cached (D4).
+      if (session) {
+        try { await session.whenIdle(); } catch {}
+      }
+      const transcribeOptions = session
+        ? { ...options.transcribeOptions, pieceCache: session.cache }
+        : options.transcribeOptions;
+      const result = await runTranscription(locate(claimed), claimed.id, transcribeOptions);
       const status = result.rejected ? "speaker_rejected" : result.hasSpeech ? "transcribed" : "no_speech";
       const outcome = { ok: true, id: claimed.id, text: result.text, hasSpeech: result.hasSpeech,
         rejected: Boolean(result.rejected), durationMs: claimed.duration_ms,
@@ -441,7 +494,142 @@ export function createAppServer(options = {}) {
       console.error(`Recording processing failed: ${errorCategory}`);
       sendJson(res, 500, { ok: false, id: claimed.id, status: "failed", errorCategory,
         saved: metadataSaved && available(claimed), audioAvailable: available(claimed) });
-    } finally { liveAttempts.delete(claimed.id); enqueueArchive(claimed.id); }
+    } finally {
+      liveAttempts.delete(claimed.id);
+      enqueueArchive(claimed.id);
+      session?.dispose();
+    }
+  };
+
+  // Save and process one accepted intake under `id`. Shared by the upload
+  // route and a streamed finish so identity checks, replay, staging and
+  // archiving behave identically (design D5). A stream session, when present,
+  // contributes the pieces already transcribed ahead of time.
+  const acceptIntake = async ({ res, id, audioData, extension, durationMs, clientDevice, streamSession = null }) => {
+    try {
+      const fingerprint = crypto.createHash("sha256").update(audioData).digest("hex");
+      const existing = reconcileIdle(store.getRecording(id));
+      if (existing) {
+        const previousFingerprint = existing.fingerprint || (available(existing)
+          ? crypto.createHash("sha256").update(files.readFileSync(locate(existing))).digest("hex") : null);
+        if (!previousFingerprint || previousFingerprint !== fingerprint) {
+          sendJson(res, 409, { ok: false, id, errorCategory: "identity_conflict" }); return;
+        }
+        if (available(existing) || terminal.has(existing.status) || liveAttempts.has(id)) {
+          respondExisting(res, existing); return;
+        }
+        // No accepted server copy: the same local bytes may repair intake using the same row.
+      }
+      const rawFilename = existing ? existing.raw_filename : `${id}${extension}`;
+      if (!rawFilename || path.basename(rawFilename) !== rawFilename || !rawFilename.startsWith(`${id}.`)) {
+        sendJson(res, 409, { ok: false, id, errorCategory: "identity_conflict" }); return;
+      }
+      let rec;
+      let staged = false;
+      try {
+        rec = existing ? store.updateRecording(id, "intake", "", false) : store.saveRecording({ id, durationMs: Math.max(0, durationMs || 0), clientDevice,
+          rawFilename, status: "intake", fingerprint, audioAvailable: false });
+        if (stagingDir) {
+          try { writeIntake(stagingDir, rawFilename, audioData, existing); }
+          catch (error) {
+            // Any staging failure falls back to the archive; intake still succeeds.
+            console.error(`Staging intake failed (${category(error)}); falling back to the archive`);
+            writeIntake(rawDir, rawFilename, audioData, existing);
+          }
+        } else {
+          writeIntake(rawDir, rawFilename, audioData, existing);
+        }
+        staged = Boolean(audioFileIn(stagingDir, rawFilename));
+        rec = store.updateRecording(id, "pending", "", true);
+      } catch (error) {
+        const errorCategory = category(error);
+        let metadataSaved = false;
+        try { if (rec) metadataSaved = Boolean(store.updateRecording(id, "failed", errorCategory, available(rec))); } catch {}
+        sendJson(res, 500, { ok: false, id, status: "failed", errorCategory,
+          saved: false, audioAvailable: Boolean(rec && available(rec)), metadataSaved });
+        if (staged) enqueueArchive(id);
+        return;
+      }
+      await processRecording(res, rec, streamSession);
+    } finally {
+      streamSession?.dispose();
+    }
+  };
+
+  // -------------------------------------------------------------
+  // API: Streamed recording intake (design D2, D3, D5, D7)
+  // -------------------------------------------------------------
+  const appendStream = async (req, res, url, id) => {
+    if (store.getRecording(id)) {
+      sendJson(res, 409, { ok: false, id, errorCategory: "already_saved" }); return;
+    }
+    const rawOffset = url.searchParams.get("offset");
+    if (rawOffset === null || !/^\d+$/.test(rawOffset)) {
+      sendJson(res, 400, { ok: false, id, errorCategory: "stream_offset" }); return;
+    }
+    const offset = Number(rawOffset);
+    if (!Number.isSafeInteger(offset) || offset % 2 !== 0) {
+      sendJson(res, 400, { ok: false, id, errorCategory: "stream_offset" }); return;
+    }
+    const bytes = await readBody(req, MAX_STREAM_APPEND);
+    if (bytes.length % 2 !== 0) {
+      sendJson(res, 400, { ok: false, id, errorCategory: "stream_offset" }); return;
+    }
+    // A finish may have saved the recording while this body was arriving.
+    if (store.getRecording(id)) {
+      sendJson(res, 409, { ok: false, id, errorCategory: "already_saved" }); return;
+    }
+    let session = openStreamSession(id);
+    let created = false;
+    if (!session) {
+      session = newStreamSession(id);
+      streamSessions.set(id, session);
+      created = true;
+    }
+    const result = session.append(offset, bytes);
+    if (created && result.received === 0) {
+      // Nothing was held: do not leave an empty session behind.
+      streamSessions.delete(id);
+      session.dispose();
+    }
+    if (!result.ok) {
+      sendJson(res, result.errorCategory === "too_large" ? 413 : 409, { ok: false, id, ...result });
+      return;
+    }
+    sendJson(res, 200, { ok: true, received: result.received });
+  };
+
+  const finishStream = async (req, res, id) => {
+    const session = openStreamSession(id);
+    if (!session) {
+      sendJson(res, 404, { ok: false, id, errorCategory: "no_stream" }); return;
+    }
+    const body = await readBody(req, MAX_STREAM_APPEND);
+    let payload;
+    try { payload = JSON.parse(body.toString("utf8") || "{}"); }
+    catch { sendJson(res, 400, { ok: false, id, errorCategory: "invalid_finish" }); return; }
+    if (!payload || typeof payload !== "object") {
+      sendJson(res, 400, { ok: false, id, errorCategory: "invalid_finish" }); return;
+    }
+    const expectedBytes = Number(payload.bytes);
+    const expectedHash = typeof payload.sha256 === "string" ? payload.sha256.toLowerCase() : "";
+    if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0 || !/^[0-9a-f]{64}$/.test(expectedHash)) {
+      sendJson(res, 400, { ok: false, id, errorCategory: "invalid_finish" }); return;
+    }
+    const pcm = session.pcm();
+    const wav = encodePcm16Wav(pcm, 16000);
+    if (pcm.length !== expectedBytes || wavSha256(wav) !== expectedHash) {
+      takeStreamSession(id)?.dispose();
+      sendJson(res, 409, { ok: false, id, errorCategory: "stream_mismatch", received: pcm.length });
+      return;
+    }
+    const streamSession = takeStreamSession(id);
+    await acceptIntake({
+      res, id, audioData: wav, extension: ".wav",
+      durationMs: Math.max(0, parseInt(payload.durationMs, 10) || 0),
+      clientDevice: typeof payload.device === "string" && payload.device.trim() ? payload.device.trim() : "unknown",
+      streamSession,
+    });
   };
 
   const server = http.createServer(async (req, res) => {
@@ -649,50 +837,21 @@ export function createAppServer(options = {}) {
           sendJson(res, 400, { ok: false, errorCategory: "invalid_identity" }); return;
         }
         const id = suppliedId || crypto.randomUUID();
-        const fingerprint = crypto.createHash("sha256").update(audioData).digest("hex");
-        const existing = reconcileIdle(store.getRecording(id));
-        if (existing) {
-          const previousFingerprint = existing.fingerprint || (available(existing)
-            ? crypto.createHash("sha256").update(files.readFileSync(locate(existing))).digest("hex") : null);
-          if (!previousFingerprint || previousFingerprint !== fingerprint) {
-            sendJson(res, 409, { ok: false, id, errorCategory: "identity_conflict" }); return;
-          }
-          if (available(existing) || terminal.has(existing.status) || liveAttempts.has(id)) {
-            respondExisting(res, existing); return;
-          }
-          // No accepted server copy: the same local bytes may repair intake using the same row.
-        }
-        const rawFilename = existing ? existing.raw_filename : `${id}${extension}`;
-        if (!rawFilename || path.basename(rawFilename) !== rawFilename || !rawFilename.startsWith(`${id}.`)) {
-          sendJson(res, 409, { ok: false, id, errorCategory: "identity_conflict" }); return;
-        }
-        let rec;
-        let staged = false;
-        try {
-          rec = existing ? store.updateRecording(id, "intake", "", false) : store.saveRecording({ id, durationMs: Math.max(0, durationMs || 0), clientDevice,
-            rawFilename, status: "intake", fingerprint, audioAvailable: false });
-          if (stagingDir) {
-            try { writeIntake(stagingDir, rawFilename, audioData, existing); }
-            catch (error) {
-              // Any staging failure falls back to the archive; intake still succeeds.
-              console.error(`Staging intake failed (${category(error)}); falling back to the archive`);
-              writeIntake(rawDir, rawFilename, audioData, existing);
-            }
-          } else {
-            writeIntake(rawDir, rawFilename, audioData, existing);
-          }
-          staged = Boolean(audioFileIn(stagingDir, rawFilename));
-          rec = store.updateRecording(id, "pending", "", true);
-        } catch (error) {
-          const errorCategory = category(error);
-          let metadataSaved = false;
-          try { if (rec) metadataSaved = Boolean(store.updateRecording(id, "failed", errorCategory, available(rec))); } catch {}
-          sendJson(res, 500, { ok: false, id, status: "failed", errorCategory,
-            saved: false, audioAvailable: Boolean(rec && available(rec)), metadataSaved });
-          if (staged) enqueueArchive(id);
-          return;
-        }
-        await processRecording(res, rec);
+        // A fallback upload for a recording that streamed keeps its piece cache (D7).
+        await acceptIntake({ res, id, audioData, extension, durationMs, clientDevice,
+          streamSession: takeStreamSession(id) });
+        return;
+      }
+
+      // -------------------------------------------------------------
+      // API: Streamed recording (design D2, D5)
+      // -------------------------------------------------------------
+      const streamMatch = pathname.match(/^\/api\/recording\/([^/]+)\/stream(\/finish)?$/);
+      if (req.method === "POST" && streamMatch) {
+        const id = streamMatch[1];
+        if (!validId(id)) { sendJson(res, 400, { ok: false, errorCategory: "invalid_identity" }); return; }
+        if (streamMatch[2]) await finishStream(req, res, id);
+        else await appendStream(req, res, url, id);
         return;
       }
 
@@ -820,13 +979,12 @@ export function createAppServer(options = {}) {
       sendJson(res, err.statusCode || 500, { ok: false, errorCategory: category(err), error: pathname.startsWith("/api/profile/") && err.statusCode === 400 && /shorter than/.test(err.message) ? "Enrollment clips are shorter than the required minimum" : "Request failed" });
     }
   });
-  if (stagingDir) {
-    sweepStaging();
-    if (Number.isFinite(stagingSweepMs) && stagingSweepMs > 0) {
-      const timer = setInterval(sweepStaging, stagingSweepMs);
-      timer.unref?.();
-      server.on("close", () => clearInterval(timer));
-    }
+  sweepStaging();
+  sweepStreams();
+  if (Number.isFinite(stagingSweepMs) && stagingSweepMs > 0) {
+    const timer = setInterval(() => { sweepStaging(); sweepStreams(); }, stagingSweepMs);
+    timer.unref?.();
+    server.on("close", () => clearInterval(timer));
   }
   // Test hook: resolves once the serial archive queue is drained.
   server.archiveIdle = archiveIdle;
