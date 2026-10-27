@@ -24,6 +24,7 @@ final class RecordingStreamer implements Runnable {
     private volatile boolean canceled = false;
     private long sent = 0;
     private long backoff = INTERVAL_MS;
+    private volatile long nextSend = 0;
     private Thread thread;
 
     RecordingStreamer(String endpoint, File file) {
@@ -49,6 +50,7 @@ final class RecordingStreamer implements Runnable {
         synchronized (lock) {
             if (pcmBytes > written) written = pcmBytes;
             recording = false;
+            nextSend = 0;
             lock.notifyAll();
         }
     }
@@ -80,29 +82,31 @@ final class RecordingStreamer implements Runnable {
 
     @Override
     public void run() {
-        long next = System.currentTimeMillis() + INTERVAL_MS;
+        nextSend = System.currentTimeMillis() + INTERVAL_MS;
         while (!canceled) {
             long target;
             synchronized (lock) {
                 long now = System.currentTimeMillis();
-                boolean finished = !recording;
-                boolean due = sent < written && (finished || now >= next);
-                if (!due && finished && sent >= written) break;
-                if (!due && !finished && now >= next) next = now + INTERVAL_MS;
-                if (!due) {
-                    try { lock.wait(Math.max(1, next - now)); }
+                if (!recording && sent >= written) break;
+                if (sent < written && now >= nextSend) {
+                    target = written;
+                } else {
+                    if (!recording && sent >= written) break;
+                    if (now >= nextSend) nextSend = now + INTERVAL_MS;
+                    try { lock.wait(Math.max(1, nextSend - now)); }
                     catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); break; }
                     continue;
                 }
-                target = written;
             }
-            if (target <= sent) continue;
-            if (!send(target)) {
-                backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
-            } else {
+            boolean sentOk = send(target);
+            long now = System.currentTimeMillis();
+            if (sentOk) {
                 backoff = INTERVAL_MS;
+                nextSend = recording ? now + INTERVAL_MS : now;
+            } else {
+                nextSend = now + backoff;
+                backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
             }
-            next = System.currentTimeMillis() + backoff;
         }
     }
 
