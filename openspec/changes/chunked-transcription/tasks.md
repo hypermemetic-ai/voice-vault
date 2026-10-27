@@ -15,7 +15,7 @@
 
 - [ ] 3.1 In `src/whisper-daemon.mjs`, parse the WAV header before enqueueing and answer HTTP 413 with `{ ok: false, error }` when duration > `WHISPER_MAX_AUDIO_MS` (default 120000), passing unreadable headers through (design D7). Export or factor the header-duration helper so it is unit-testable without spawning handy; verify with a test in `test/transcriber.test.mjs` (or a new `test/whisper-daemon.test.mjs`) using a synthetic 10-minute header and a 30 s header
 - [ ] 3.2 Make `queryHandyDirect` pass `--model ${WHISPER_MODEL || "turbo"}` (design D8); add a test asserting the spawned args with `WHISPER_MODEL=bark-3.0-clean-Q8_0` via a stub `bin` script that echoes its argv as JSON; verify it passes
-- [ ] 3.3 Document `WHISPER_MODEL` (direct tiers), `WHISPER_MAX_AUDIO_MS` and the `VOICE_VAULT_PIECE_*` variables in the README environment table and describe long-recording behaviour in the transcription section; verify the README table lists all five names
+- [ ] 3.3 Document `WHISPER_MODEL` (direct tiers), `WHISPER_MAX_AUDIO_MS` and the `VOICE_VAULT_PIECE_*` variables in the README environment table and describe long-recording behaviour in the transcription section, replacing the inaccurate "streaming sliding-window support for arbitrarily long recordings" claim; verify the README table lists all five names and the old claim is gone
 
 ## 4. Integration checks
 
