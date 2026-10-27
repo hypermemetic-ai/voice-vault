@@ -31,6 +31,11 @@ for (const key of [
   "HANDY_DEVICE_INDEX_GPU",
   "HANDY_DEVICE_INDEX_IGPU",
   "HANDY_DEVICE_INDEX_CPU",
+  "WHISPER_MODEL",
+  "VOICE_VAULT_PIECE_MAX_MS",
+  "VOICE_VAULT_PIECE_WINDOW_START_MS",
+  "VOICE_VAULT_PIECE_WINDOW_END_MS",
+  "VOICE_VAULT_PIECE_OVERLAP_MS",
 ]) {
   delete process.env[key];
 }
@@ -43,7 +48,9 @@ const {
   queryWhisperSocket,
   queryHandyDirect,
   defaultTranscribe,
+  transcribeAudioFile,
 } = await import("../src/transcriber.mjs");
+const { decodeWav, encodePcm16Wav } = await import("../src/wav.mjs");
 
 const ENV_KEYS = [
   "WHISPER_SOCKET",
@@ -53,6 +60,11 @@ const ENV_KEYS = [
   "HANDY_DEVICE_INDEX_GPU",
   "HANDY_DEVICE_INDEX_IGPU",
   "HANDY_DEVICE_INDEX_CPU",
+  "WHISPER_MODEL",
+  "VOICE_VAULT_PIECE_MAX_MS",
+  "VOICE_VAULT_PIECE_WINDOW_START_MS",
+  "VOICE_VAULT_PIECE_WINDOW_END_MS",
+  "VOICE_VAULT_PIECE_OVERLAP_MS",
 ];
 
 /** Run `fn` with the given env overrides, restoring the previous values after. */
@@ -387,4 +399,263 @@ test("defaultTranscribe honours per-tier env overrides and injected queries", as
   assert.equal(result.backend, "handy_direct_cpu");
   assert.equal(result.text, "injected");
   assert.equal(result.attempts.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Direct tiers use the configured model (design D8)
+// ---------------------------------------------------------------------------
+
+test("queryHandyDirect passes WHISPER_MODEL to handy instead of turbo", async () => {
+  const dir = tempDir("handy-model");
+  const bin = path.join(dir, "handy");
+  const argvFile = path.join(dir, "argv.txt");
+  fs.writeFileSync(
+    bin,
+    [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "$@" > "${argvFile}"`,
+      `printf '%s' '{"text":"model stub","transcribe_ms":1}'`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const modelIn = () => {
+    const argv = fs.readFileSync(argvFile, "utf8").trim().split("\n");
+    return argv[argv.indexOf("--model") + 1];
+  };
+  try {
+    await withEnv({ WHISPER_MODEL: "bark-3.0-clean-Q8_0" }, async () => {
+      const result = await queryHandyDirect("/tmp/audio.wav", { bin, deviceIndex: 1, timeoutMs: 5_000 });
+      assert.equal(result.text, "model stub");
+      assert.equal(modelIn(), "bark-3.0-clean-Q8_0");
+    });
+
+    await withEnv({ WHISPER_MODEL: undefined }, async () => {
+      await queryHandyDirect("/tmp/audio.wav", { bin, deviceIndex: 1, timeoutMs: 5_000 });
+      assert.equal(modelIn(), "turbo", "hosts without configuration keep the old default");
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Chunked long-recording transcription (design D3-D6)
+// ---------------------------------------------------------------------------
+
+const PIECE_SR = 16000;
+
+function seconds(value) {
+  return Math.round(value * PIECE_SR);
+}
+
+/** Flat continuous tone: no pause, so the cutter must force its cuts. */
+function flatTone(durationSeconds, amplitude = 6000, frequency = 180) {
+  const samples = new Int16Array(seconds(durationSeconds));
+  for (let i = 0; i < samples.length; i += 1) {
+    samples[i] = Math.round(Math.sin((2 * Math.PI * frequency * i) / PIECE_SR) * amplitude);
+  }
+  return samples;
+}
+
+/** Speech-ish amplitude-modulated burst (same shape as the vad tests). */
+function speechBurst(durationSeconds, amplitude = 6000, frequency = 180) {
+  const samples = new Int16Array(seconds(durationSeconds));
+  for (let i = 0; i < samples.length; i += 1) {
+    const t = i / PIECE_SR;
+    const envelope = 0.55 + 0.45 * Math.sin(2 * Math.PI * 3.1 * t);
+    const value =
+      Math.sin(2 * Math.PI * frequency * t) * 0.7 +
+      Math.sin(2 * Math.PI * 2 * frequency * t) * 0.3;
+    samples[i] = Math.round(value * envelope * amplitude);
+  }
+  return samples;
+}
+
+function silencePcm(durationSeconds) {
+  return new Int16Array(seconds(durationSeconds));
+}
+
+function concatPcm(chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Int16Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+function writeSyntheticWav(dir, name, pcm) {
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, encodePcm16Wav(pcm, PIECE_SR));
+  return file;
+}
+
+function wavDurationMs(wavPath) {
+  const decoded = decodeWav(fs.readFileSync(wavPath));
+  return decoded ? (decoded.samples.length / decoded.sampleRate) * 1000 : 0;
+}
+
+test("a short recording is one request and reports one piece", async () => {
+  const dir = tempDir("piece-short");
+  const file = writeSyntheticWav(dir, "short.wav", speechBurst(20));
+  const calls = [];
+  try {
+    const result = await transcribeAudioFile(file, "short-piece", {
+      speakerGate: false,
+      transcribe: async (wavPath, reqId) => {
+        calls.push({ reqId, durationMs: wavDurationMs(wavPath) });
+        return { text: "Short words.", transcribe_ms: 5, backend: "daemon_gpu" };
+      },
+    });
+    assert.equal(calls.length, 1, "short audio must stay a single request");
+    assert.equal(calls[0].reqId, "short-piece");
+    assert.ok(calls[0].durationMs > 19_000 && calls[0].durationMs <= 20_000);
+    assert.equal(result.pieces, 1);
+    assert.equal(result.text, "Short words.");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a long recording is transcribed as bounded pieces joined in order", async () => {
+  const dir = tempDir("piece-long");
+  const file = writeSyntheticWav(dir, "long.wav", flatTone(100));
+  const texts = ["Alpha.", "Beta.", "Gamma."];
+  const durations = [];
+  let call = 0;
+  try {
+    const result = await transcribeAudioFile(file, "three", {
+      speakerGate: false,
+      transcribe: async (wavPath, reqId) => {
+        assert.equal(reqId, `three-p${call}`, "pieces run sequentially with indexed ids");
+        durations.push(wavDurationMs(wavPath));
+        return { text: texts[call++], transcribe_ms: 10, backend: "daemon_gpu" };
+      },
+    });
+
+    assert.equal(call, 3);
+    assert.equal(result.pieces, 3);
+    assert.equal(result.text, "Alpha. Beta. Gamma.");
+    assert.deepEqual(result.pieceBackends, ["daemon_gpu", "daemon_gpu", "daemon_gpu"]);
+    for (const [index, durationMs] of durations.entries()) {
+      assert.ok(durationMs <= 45_000 + 1, `piece ${index} is ${durationMs}ms long`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a forced seam drops the words the overlapping pieces repeat", async () => {
+  const dir = tempDir("piece-dedup");
+  // 50 s of flat tone: one forced 45 s cut, then a 43.5 s overlapping tail.
+  const file = writeSyntheticWav(dir, "forced.wav", flatTone(50));
+  const texts = ["Alpha beta gamma delta", "delta epsilon zeta"];
+  try {
+    const result = await transcribeAudioFile(file, "dedup", {
+      speakerGate: false,
+      transcribe: async () => ({
+        text: texts.shift(),
+        transcribe_ms: 1,
+        backend: "daemon_gpu",
+      }),
+    });
+    assert.equal(result.pieces, 2);
+    assert.equal(result.text, "Alpha beta gamma delta epsilon zeta");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a pause seam keeps a word that genuinely repeats", async () => {
+  const dir = tempDir("piece-pause");
+  const pcm = concatPcm([speechBurst(26.8), silencePcm(0.4), speechBurst(33)]);
+  const file = writeSyntheticWav(dir, "pause.wav", pcm);
+  const texts = ["alpha omega", "omega beta"];
+  try {
+    const result = await transcribeAudioFile(file, "pause", {
+      speakerGate: false,
+      transcribe: async () => ({
+        text: texts.shift(),
+        transcribe_ms: 1,
+        backend: "daemon_gpu",
+      }),
+    });
+    assert.equal(result.pieces, 2);
+    assert.equal(result.text, "alpha omega omega beta", "pause seams are never deduplicated");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("one piece falling back does not resend the pieces that succeeded", async () => {
+  const dir = tempDir("piece-fallback");
+  const file = writeSyntheticWav(dir, "fallback.wav", flatTone(100));
+  const socketCalls = [];
+  const handyCalls = [];
+  try {
+    const result = await transcribeAudioFile(file, "fallback", {
+      speakerGate: false,
+      transcribe: (wavPath, reqId) => defaultTranscribe(wavPath, reqId, {
+        tiers: [
+          { backend: "daemon_gpu", kind: "socket" },
+          { backend: "handy_direct_cpu", kind: "handy", deviceIndex: 2 },
+        ],
+        socketQuery: async (_wav, id) => {
+          socketCalls.push(id);
+          if (id === "fallback-p1") throw new Error("daemon rejected this piece");
+          return { text: `daemon ${id}`, transcribe_ms: 3 };
+        },
+        handyQuery: async () => {
+          handyCalls.push("cpu");
+          return { text: "fallback p1", transcribe_ms: 4 };
+        },
+      }),
+    });
+
+    assert.deepEqual(socketCalls, ["fallback-p0", "fallback-p1", "fallback-p2"]);
+    assert.equal(handyCalls.length, 1, "only the failed piece reaches the next tier");
+    assert.equal(result.pieces, 3);
+    assert.deepEqual(result.pieceBackends, ["daemon_gpu", "handy_direct_cpu", "daemon_gpu"]);
+    assert.equal(result.backend, "handy_direct_cpu", "the degraded tier is not hidden");
+    assert.equal(result.text, "daemon fallback-p0 fallback p1 daemon fallback-p2");
+    assert.deepEqual(
+      result.backendAttempts.map((attempt) => ({ piece: attempt.piece, backend: attempt.backend })),
+      [{ piece: 1, backend: "daemon_gpu" }],
+    );
+    assert.match(result.backendAttempts[0].error, /daemon rejected this piece/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a piece that exhausts every tier fails the whole transcription with its index", async () => {
+  const dir = tempDir("piece-fail");
+  const file = writeSyntheticWav(dir, "fail.wav", flatTone(100));
+  const calls = [];
+  const failure = new Error("All Whisper backends failed: daemon_gpu (down)");
+  failure.attempts = [{ backend: "daemon_gpu", error: "down" }];
+  try {
+    await assert.rejects(
+      transcribeAudioFile(file, "fail", {
+        speakerGate: false,
+        transcribe: async (_wavPath, reqId) => {
+          calls.push(reqId);
+          if (reqId === "fail-p1") throw failure;
+          return { text: "ok", transcribe_ms: 1, backend: "daemon_gpu" };
+        },
+      }),
+      (error) => {
+        assert.equal(error.pieceIndex, 1);
+        assert.equal(error.message, failure.message);
+        assert.deepEqual(error.attempts, failure.attempts);
+        return true;
+      },
+    );
+    assert.deepEqual(calls, ["fail-p0", "fail-p1"], "later pieces are not attempted");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
