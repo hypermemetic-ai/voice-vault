@@ -19,7 +19,7 @@ import java.util.List;
  */
 public final class VoiceVaultApi {
 
-    public static final String BASE_URL = "https://qq-box.tail580136.ts.net:3443";
+    public static final String BASE_URL = "https://infer1.tail580136.ts.net:3443";
     public static final String TRANSCRIBE_URL = BASE_URL + "/api/transcribe";
     public static String streamUrl(String id) { return BASE_URL + "/api/recording/" + id + "/stream"; }
     public static String finishUrl(String id) { return BASE_URL + "/api/recording/" + id + "/stream/finish"; }

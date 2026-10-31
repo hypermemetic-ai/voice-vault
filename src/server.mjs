@@ -999,7 +999,7 @@ export function startServer(options = {}) {
     server.listen(port, host, () => {
       const address = server.address();
       console.log(`Voice Vault server listening on http://${host}:${address.port}`);
-      console.log(`Accessible over Tailscale HTTPS at https://qq-box.tail580136.ts.net:3443`);
+      console.log(`Accessible over Tailscale HTTPS at https://infer1.tail580136.ts.net:3443`);
       resolve({ server, port: address.port, host });
     });
   });

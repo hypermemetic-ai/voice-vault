@@ -180,7 +180,7 @@ public class HistoryManager {
     private static List<Entry> fetchRemoteEntries() {
         List<Entry> remoteEntries = new ArrayList<>();
         try {
-            URL url = new URL("https://qq-box.tail580136.ts.net:3443/api/history?limit=50");
+            URL url = new URL("https://infer1.tail580136.ts.net:3443/api/history?limit=50");
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(6000);
