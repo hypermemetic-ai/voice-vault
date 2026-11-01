@@ -368,7 +368,7 @@ host (AMD Ryzen 7 250 + RTX A2000, ONNX CPU provider, 3.8 s utterance):
 | `VOICE_VAULT_SPEAKER_THREADS` | `4` | onnxruntime intra-op threads |
 | `WHISPER_SOCKET` | `/tmp/voice-vault-asr.sock` | Warm ASR daemon unix socket |
 | `WHISPER_SOCKET_TIMEOUT_MS` | `15000` | Daemon cap before falling back to `handy` |
-| `WHISPER_MODEL` | `turbo` | Model for the warm daemon and direct `handy` tiers (production: `bark-3.0-clean-Q8_0`) |
+| `WHISPER_MODEL` | `turbo` | Model for the warm daemon and direct `handy` tiers (production: `handy-computer/parakeet-tdt-0.6b-v2-gguf/parakeet-tdt-0.6b-v2-Q8_0.gguf`) |
 | `WHISPER_MAX_AUDIO_MS` | `120000` | Warm daemon refuses WAV input longer than this (HTTP 413) |
 | `VOICE_VAULT_PIECE_MAX_MS` | `45000` | Maximum length of one transcribed piece |
 | `VOICE_VAULT_PIECE_WINDOW_START_MS` | `20000` | Start of the pause-search window |
