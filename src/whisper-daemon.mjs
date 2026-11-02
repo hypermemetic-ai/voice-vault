@@ -5,6 +5,7 @@ import readline from "node:readline";
 import { spawn } from "node:child_process";
 import { resolveDisplay } from "./transcriber.mjs";
 import { audioBoundDecision, readWavHeader, resolveMaxAudioMs } from "./audio-bound.mjs";
+import { createDaemonQueue, resolveWedgeTimeoutMs } from "./daemon-queue.mjs";
 
 const SOCKET_PATH = process.env.WHISPER_SOCKET || "/tmp/voice-vault-asr.sock";
 const HANDY_BIN = process.env.HANDY_BIN || "/home/qqp/.local/bin/handy";
@@ -13,13 +14,7 @@ const MODEL = process.env.WHISPER_MODEL || "turbo";
 
 let child = null;
 let childRl = null;
-let isReady = false;
-let boundBackend = "unknown";
 let shuttingDown = false;
-
-// Queue of pending requests: { id, wav, resolve, reject, timer }
-const requestQueue = [];
-let inFlight = null;
 
 function log(...args) {
   console.log(`[voice-vault-asr ${new Date().toISOString()}]`, ...args);
@@ -28,6 +23,13 @@ function log(...args) {
 function logError(...args) {
   console.error(`[voice-vault-asr ${new Date().toISOString()}]`, ...args);
 }
+
+const queue = createDaemonQueue({
+  write: ({ id, wav }) => child.stdin.write(JSON.stringify({ id, wav }) + "\n"),
+  killChild: () => child?.kill("SIGKILL"),
+  wedgeTimeoutMs: resolveWedgeTimeoutMs(),
+  log,
+});
 
 function startHandy() {
   if (shuttingDown) return;
@@ -75,21 +77,9 @@ function startHandy() {
 
   child.on("close", (code, signal) => {
     log(`Handy process exited with code ${code}, signal ${signal}`);
-    isReady = false;
     child = null;
     childRl = null;
-
-    // Fail any in-flight or queued requests
-    if (inFlight) {
-      clearTimeout(inFlight.timer);
-      inFlight.reject(new Error(`Handy process exited unexpectedly (code ${code})`));
-      inFlight = null;
-    }
-    while (requestQueue.length > 0) {
-      const req = requestQueue.shift();
-      clearTimeout(req.timer);
-      req.reject(new Error("Handy process restarted"));
-    }
+    queue.childExited(code);
 
     if (!shuttingDown) {
       log("Restarting Handy in 1000ms...");
@@ -100,89 +90,21 @@ function startHandy() {
 
 function handleHandyMessage(msg) {
   if (msg.ready) {
-    isReady = true;
-    boundBackend = msg.bound_backend || "ready";
-    log(`Handy is ready. Backend: ${boundBackend}, load_ms: ${msg.load_ms}`);
-    pumpQueue();
+    queue.markReady(msg.bound_backend);
+    log(`Handy is ready. Backend: ${queue.status().backend}, load_ms: ${msg.load_ms}`);
     return;
   }
 
-  if (inFlight && msg.id === inFlight.id) {
-    clearTimeout(inFlight.timer);
-    const curr = inFlight;
-    inFlight = null;
-
-    if (msg.ok === false) {
-      curr.reject(new Error(msg.error || "Handy transcription failed"));
-    } else {
-      curr.resolve({
-        ok: true,
-        text: msg.text || "",
-        transcribe_ms: msg.transcribe_ms,
-        backend: msg.bound_backend || boundBackend,
-      });
-    }
-
-    pumpQueue();
-  } else if (msg.id) {
-    logError(`Received response for unexpected id: ${msg.id}`);
+  if (!queue.handleReply(msg) && msg.id) {
+    log(`Discarding reply for ${msg.id}: no request is waiting for it`);
   }
-}
-
-function pumpQueue() {
-  if (!isReady || !child || inFlight || requestQueue.length === 0) {
-    return;
-  }
-
-  inFlight = requestQueue.shift();
-  try {
-    const payload = JSON.stringify({ id: inFlight.id, wav: inFlight.wav }) + "\n";
-    child.stdin.write(payload);
-  } catch (err) {
-    logError("Failed to write to handy stdin:", err);
-    clearTimeout(inFlight.timer);
-    const curr = inFlight;
-    inFlight = null;
-    curr.reject(err);
-    pumpQueue();
-  }
-}
-
-function enqueueTranscription(id, wavPath) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      // Find in queue or check if inFlight
-      const qIdx = requestQueue.findIndex((item) => item.id === id);
-      if (qIdx !== -1) {
-        requestQueue.splice(qIdx, 1);
-        reject(new Error(`Transcription queued timeout after 15000ms`));
-      } else if (inFlight && inFlight.id === id) {
-        inFlight = null;
-        reject(new Error(`Transcription processing timeout after 15000ms`));
-        // Reset handy since it might be wedged
-        if (child) {
-          log("Killing wedged handy process...");
-          child.kill("SIGKILL");
-        }
-      }
-    }, 15000);
-
-    requestQueue.push({ id, wav: wavPath, resolve, reject, timer });
-    pumpQueue();
-  });
 }
 
 // HTTP Server on Unix domain socket
 const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && (req.url === "/health" || req.url === "/status")) {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      ok: true,
-      ready: isReady,
-      backend: boundBackend,
-      queueLength: requestQueue.length,
-      inFlight: !!inFlight,
-    }));
+    res.end(JSON.stringify({ ok: true, ...queue.status() }));
     return;
   }
 
@@ -228,8 +150,18 @@ const server = http.createServer(async (req, res) => {
 
       const reqId = id || `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
+      // The client gives up after its own bound and falls back to another
+      // tier. Drop its request if it is still queued; one already in flight
+      // finishes so the warm model is not interrupted.
+      const request = queue.enqueue(reqId, wav);
+      res.on("close", () => {
+        if (!res.writableFinished && request.cancel()) {
+          log(`Dropped ${reqId}: client disconnected while it was queued`);
+        }
+      });
+
       try {
-        const result = await enqueueTranscription(reqId, wav);
+        const result = await request.promise;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
       } catch (err) {

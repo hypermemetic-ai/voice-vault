@@ -151,6 +151,14 @@ to the next one. `POST /api/transcribe` reports the winning `backend` plus the
 per-tier `backendAttempts` history, and a hung `handy` process is killed at
 `HANDY_TIMEOUT_MS` instead of blocking the request forever.
 
+The 15 s cap only decides when the client falls back. The daemon itself keeps a
+slow request running, because on a busy host (another project's builds or a
+game on the GPU) a cold restart takes longer than the reply it would interrupt.
+It kills its `handy` child only when a request gets no reply within
+`WHISPER_WEDGE_TIMEOUT_MS` (default 120 s). Requests still queued when their
+client hangs up are dropped, so the model never transcribes audio nobody is
+waiting for.
+
 ### Long recordings
 
 Speech audio longer than one piece is cut at the quietest pause between 20 and
@@ -370,6 +378,7 @@ host (AMD Ryzen 7 250 + RTX A2000, ONNX CPU provider, 3.8 s utterance):
 | `WHISPER_SOCKET_TIMEOUT_MS` | `15000` | Daemon cap before falling back to `handy` |
 | `WHISPER_MODEL` | `turbo` | Model for the warm daemon and direct `handy` tiers (production: `handy-computer/parakeet-tdt-0.6b-v2-gguf/parakeet-tdt-0.6b-v2-Q8_0.gguf`) |
 | `WHISPER_MAX_AUDIO_MS` | `120000` | Warm daemon refuses WAV input longer than this (HTTP 413) |
+| `WHISPER_WEDGE_TIMEOUT_MS` | `120000` | Warm daemon kills its `handy` child when a request gets no reply within this |
 | `VOICE_VAULT_PIECE_MAX_MS` | `45000` | Maximum length of one transcribed piece |
 | `VOICE_VAULT_PIECE_WINDOW_START_MS` | `20000` | Start of the pause-search window |
 | `VOICE_VAULT_PIECE_WINDOW_END_MS` | `40000` | End of the pause-search window |
