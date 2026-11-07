@@ -30,7 +30,7 @@ const {
 } = await import("../src/stream-session.mjs");
 const { cutPieces, resolvePieceOptions } = await import("../src/chunker.mjs");
 const { pieceCacheKey } = await import("../src/transcriber.mjs");
-const { encodePcm16Wav } = await import("../src/wav.mjs");
+const { decodeWav, encodePcm16Wav } = await import("../src/wav.mjs");
 
 const SR = 16000;
 
@@ -119,6 +119,35 @@ test("finalized pieces are transcribed in the background, one at a time, and cac
       attempts: [],
     });
   }
+});
+
+test("a background piece reaches the model with its long pauses shortened", async () => {
+  const dir = sessionDir("squeeze");
+  // 5 s of tone, a 7 s pause, then tone to 60 s: no pause in the 20-40 s
+  // window, so the first piece is a forced 45 s cut holding the whole pause.
+  const full = new Int16Array(60 * SR);
+  full.set(flatTone(5), 0);
+  full.set(flatTone(48), 12 * SR);
+  const sent = [];
+  const session = createStreamSession({
+    id: "squeeze",
+    dir,
+    transcribe: async (wavPath) => {
+      sent.push(decodeWav(fs.readFileSync(wavPath)).samples.length);
+      return { text: "heard", backend: "stub" };
+    },
+  });
+  assert.equal(session.append(0, bytesOf(full)).ok, true);
+  await session.whenIdle();
+
+  const [piece] = cutPieces(full, resolvePieceOptions({ sampleRate: SR }));
+  const pieceSamples = piece.endSample - piece.startSample;
+  assert.equal(sent.length, 1);
+  assert.equal(pieceSamples, 45 * SR);
+  assert.ok(Math.abs(pieceSamples - sent[0] - 6 * SR) <= 0.05 * SR, `sent ${sent[0]} of ${pieceSamples} samples`);
+  // The cache stays keyed by the unshortened piece, as the final recording looks it up.
+  const key = pieceCacheKey(piece.startSample, piece.endSample, full.subarray(piece.startSample, piece.endSample));
+  assert.ok(session.cache.has(key));
 });
 
 /** Irregular bursts and pauses: no two stretches repeat, unlike a flat tone. */

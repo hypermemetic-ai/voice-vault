@@ -16,6 +16,7 @@ import {
   createPieceCutter,
   cutPieces,
   resolvePieceOptions,
+  squeezePauses,
 } from "../src/chunker.mjs";
 
 const SAMPLE_RATE = 16000;
@@ -27,6 +28,7 @@ const ENV_KEYS = [
   "VOICE_VAULT_PIECE_WINDOW_START_MS",
   "VOICE_VAULT_PIECE_WINDOW_END_MS",
   "VOICE_VAULT_PIECE_OVERLAP_MS",
+  "VOICE_VAULT_PIECE_LONG_PAUSE_MS",
 ];
 
 async function withEnv(values, fn) {
@@ -184,6 +186,34 @@ test("one call and 37 irregular pushes produce identical boundaries", () => {
   assert.deepEqual(incremental, batch);
 });
 
+test("long pauses are shortened to one second, speech kept exactly", () => {
+  const before = burst(18);
+  const after = burst(14, 5000, 220);
+  const pcm = concat([silence(3), before, silence(9), after, silence(1.5)]);
+  const squeezed = squeezePauses(pcm, { sampleRate: SAMPLE_RATE });
+
+  // 3 s lead -> 1 s, 9 s pause -> 1 s, the 1.5 s tail is short and stays.
+  assert.ok(Math.abs(ms(squeezed.length) - 35500) <= 50, `squeezed to ${ms(squeezed.length)}ms`);
+  const sameSamples = (part) => {
+    const at = squeezed.findIndex((value, index) => value === part[0] && squeezed[index + 1] === part[1] && squeezed[index + 2] === part[2]);
+    return at >= 0 && squeezed.subarray(at, at + part.length).every((value, index) => value === part[index]);
+  };
+  assert.ok(sameSamples(before.subarray(1)), "speech before the pause is intact");
+  assert.ok(sameSamples(after.subarray(1)), "speech after the pause is intact");
+});
+
+test("short pauses, quiet room tone and longPauseMs 0 leave audio untouched", () => {
+  const shortPause = concat([burst(10), silence(1.9), burst(10)]);
+  assert.equal(squeezePauses(shortPause, { sampleRate: SAMPLE_RATE }), shortPause);
+
+  const roomTone = burst(6, 300, 90); // about -40 dBFS, above the -50 dBFS threshold
+  const toned = concat([burst(5), roomTone, burst(5)]);
+  assert.equal(squeezePauses(toned, { sampleRate: SAMPLE_RATE }), toned);
+
+  const longPause = concat([burst(5), silence(5), burst(5)]);
+  assert.equal(squeezePauses(longPause, { sampleRate: SAMPLE_RATE, longPauseMs: 0 }), longPause);
+});
+
 test("an invalid environment combination falls back to the defaults", async () => {
   // A window past the maximum piece length is the design's example.
   await withEnv({ VOICE_VAULT_PIECE_WINDOW_END_MS: 60000 }, () => {
@@ -202,9 +232,11 @@ test("an invalid environment combination falls back to the defaults", async () =
       VOICE_VAULT_PIECE_WINDOW_START_MS: 12000,
       VOICE_VAULT_PIECE_WINDOW_END_MS: 25000,
       VOICE_VAULT_PIECE_OVERLAP_MS: 1000,
+      VOICE_VAULT_PIECE_LONG_PAUSE_MS: 3000,
     },
     () => {
       const resolved = resolvePieceOptions();
+      assert.equal(resolved.longPauseMs, 3000);
       assert.equal(resolved.maxMs, 30000);
       assert.equal(resolved.windowStartMs, 12000);
       assert.equal(resolved.windowEndMs, 25000);
