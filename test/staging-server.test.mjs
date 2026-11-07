@@ -159,6 +159,43 @@ test("delete removes every copy, staged or archived", async () => {
   assert.equal(db.getRecording("delete-both"), undefined);
 });
 
+test("a slow archive fsync blocks no other request, and a delete waits for the copy", async () => {
+  const stagingDir = stage("slow-fsync");
+  const rawDir = path.join(root, "raw-slow-fsync");
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  let syncing = false;
+  const files = {
+    ...fs,
+    promises: {
+      ...fs.promises,
+      async open(file, ...args) {
+        const handle = await fs.promises.open(file, ...args);
+        if (String(file).startsWith(rawDir + path.sep) && args[0] === "wx") {
+          const sync = handle.sync.bind(handle);
+          handle.sync = async () => { syncing = true; await held; return sync(); };
+        }
+        return handle;
+      },
+    },
+  };
+  const a = await app({ rawDir, stagingDir, recordingFiles: files, stagingSweepMs: 0 });
+  assert.equal((await a.upload("slow-fsync", Buffer.from("synthetic slow-fsync"))).status, 200);
+  while (!syncing) await sleep(5);
+
+  // The archive is waiting on its disk; other requests are still served.
+  assert.equal((await a.upload("during-fsync")).status, 200);
+  const deleting = a.request("/api/recording/slow-fsync", { method: "DELETE" });
+  await sleep(50);
+  release();
+  assert.equal((await deleting).status, 200);
+  await a.server.archiveIdle();
+  assert.equal(fs.existsSync(a.raw("slow-fsync.wav")), false);
+  assert.equal(fs.existsSync(a.staged("slow-fsync.wav")), false);
+  assert.equal(db.getRecording("slow-fsync"), undefined);
+  assert.equal(fs.existsSync(a.raw("during-fsync.wav")), true);
+});
+
 test("duplicate-upload verification reads a staged recording", async () => {
   const stagingDir = stage("duplicate");
   const a = await app({ stagingDir, stagingSweepMs: 0 });
@@ -235,11 +272,14 @@ test("a failed move keeps the staged copy retrievable and a later sweep complete
   let failing = true;
   const files = {
     ...fs,
-    openSync(file, ...args) {
-      if (failing && String(file).startsWith(rawDir + path.sep) && args[0] === "wx") {
-        throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
-      }
-      return fs.openSync(file, ...args);
+    promises: {
+      ...fs.promises,
+      open(file, ...args) {
+        if (failing && String(file).startsWith(rawDir + path.sep) && args[0] === "wx") {
+          return Promise.reject(Object.assign(new Error("no space left on device"), { code: "ENOSPC" }));
+        }
+        return fs.promises.open(file, ...args);
+      },
     },
   };
   const a = await app({ rawDir, stagingDir, recordingFiles: files, stagingSweepMs: 50 });

@@ -299,10 +299,14 @@ export function createAppServer(options = {}) {
 
   // Serial archive queue: staged audio moves to the archive after the attempt's
   // response, one file at a time so it never competes with itself on slow disks.
+  // The copy's writes and fsyncs are asynchronous: on a busy archive disk one
+  // fsync can wait seconds, and a synchronous copy would stall every other
+  // request (the next dictation's stream included) for that long.
   const archiveQueue = [];
   const archiveWaiters = [];
   let archiveRunning = false;
-  const archiveRecording = id => {
+  let archiveCurrent = null; // { id, done } of the copy in flight; a delete waits for it
+  const archiveRecording = async id => {
     if (liveAttempts.has(id)) return;
     const name = recordName(store.getRecording(id));
     const source = stagingDir && name ? path.join(stagingDir, name) : null;
@@ -331,17 +335,17 @@ export function createAppServer(options = {}) {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    let fd;
+    let handle;
     try {
-      fd = files.openSync(temporary, "wx", 0o600);
-      files.writeFileSync(fd, files.readFileSync(source));
-      files.fsyncSync(fd);
-      files.closeSync(fd); fd = null;
-      files.renameSync(temporary, destination);
-      const directory = files.openSync(rawDir, "r");
-      try { files.fsyncSync(directory); } finally { files.closeSync(directory); }
+      handle = await files.promises.open(temporary, "wx", 0o600);
+      await handle.writeFile(files.readFileSync(source));
+      await handle.sync();
+      await handle.close(); handle = null;
+      await files.promises.rename(temporary, destination);
+      const directory = await files.promises.open(rawDir, "r");
+      try { await directory.sync(); } finally { await directory.close(); }
     } catch (error) {
-      if (fd != null) { try { files.closeSync(fd); } catch {} }
+      if (handle != null) { try { await handle.close(); } catch {} }
       try { files.unlinkSync(temporary); } catch {}
       throw error;
     }
@@ -351,14 +355,17 @@ export function createAppServer(options = {}) {
     if (!after || after.size !== sourceStat.size || after.mtimeMs !== sourceStat.mtimeMs || liveAttempts.has(id)) return;
     files.unlinkSync(source);
   };
-  const runArchiveQueue = () => {
+  const runArchiveQueue = async () => {
     if (archiveRunning) return;
     archiveRunning = true;
     try {
       while (archiveQueue.length) {
         const id = archiveQueue.shift();
-        try { archiveRecording(id); }
+        const done = archiveRecording(id);
+        archiveCurrent = { id, done };
+        try { await done; }
         catch (error) { console.error(`Archiving audio failed: ${category(error)}`); }
+        finally { archiveCurrent = null; }
       }
     } finally {
       archiveRunning = false;
@@ -859,6 +866,11 @@ export function createAppServer(options = {}) {
       if (recordingMatch && ["GET", "POST", "DELETE"].includes(req.method)) {
         const id = recordingMatch[1];
         if (!validId(id)) { sendJson(res, 400, { ok: false, errorCategory: "invalid_identity" }); return; }
+        // A delete waits out this recording's archive copy, which would otherwise
+        // rename its audio into the archive after the delete removed the rest.
+        while (req.method === "DELETE" && archiveCurrent?.id === id) {
+          try { await archiveCurrent.done; } catch {}
+        }
         const rec = reconcileIdle(store.getRecording(id));
         if (!rec) { sendJson(res, req.method === "DELETE" ? 200 : 404, { ok: req.method === "DELETE", errorCategory: "not_found" }); return; }
         if (req.method === "GET" && !recordingMatch[2]) { sendJson(res, 200, { ok: true, recording: view(rec) }); return; }
