@@ -15,7 +15,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createPieceCutter } from "./chunker.mjs";
+import { createPieceCutter, squeezePauses } from "./chunker.mjs";
 import { defaultTranscribe, pieceCacheKey } from "./transcriber.mjs";
 import { encodePcm16Wav } from "./wav.mjs";
 
@@ -131,7 +131,8 @@ export function createStreamSession({
     try {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "voice-vault-stream-"));
       const wavPath = path.join(tmpDir, "piece.wav");
-      files.writeFileSync(wavPath, encodePcm16Wav(pcm, SAMPLE_RATE));
+      // The same audio the final recording would send for this piece.
+      files.writeFileSync(wavPath, encodePcm16Wav(squeezePauses(pcm, { sampleRate: SAMPLE_RATE }), SAMPLE_RATE));
       const resp = await transcribe(wavPath, `${id}-s${index}`);
       if (!resp || typeof resp !== "object") return;
       cache.set(key, {

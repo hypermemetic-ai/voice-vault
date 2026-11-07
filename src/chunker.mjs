@@ -27,6 +27,7 @@ export const DEFAULT_PIECE_OPTIONS = Object.freeze({
   windowEndMs: 40000,
   overlapMs: 1500,
   minPauseMs: 200,
+  longPauseMs: 2000,
 });
 
 const ENV_NAMES = Object.freeze({
@@ -34,7 +35,11 @@ const ENV_NAMES = Object.freeze({
   windowStartMs: "VOICE_VAULT_PIECE_WINDOW_START_MS",
   windowEndMs: "VOICE_VAULT_PIECE_WINDOW_END_MS",
   overlapMs: "VOICE_VAULT_PIECE_OVERLAP_MS",
+  longPauseMs: "VOICE_VAULT_PIECE_LONG_PAUSE_MS",
 });
+
+/** Audio kept at each side of a shortened long pause (see squeezePauses). */
+export const PAUSE_KEEP_MS = 500;
 
 // Pause detection mirrors segmentSpeech (src/vad.mjs): the noise floor is the
 // 20th percentile of frame levels, speech sits `noiseMarginDb` above it, and
@@ -64,11 +69,14 @@ function validOptions(options) {
     && options.overlapMs >= 0
     && options.overlapMs < options.maxMs
     && options.minPauseMs > 0
+    && (options.longPauseMs === 0 || options.longPauseMs >= 2 * PAUSE_KEEP_MS)
     && options.minPauseMs <= options.windowEndMs - options.windowStartMs;
 }
 
 /**
  * Resolve cutter options from explicit values, environment and defaults.
+ *
+ * `longPauseMs: 0` turns pause shortening off.
  *
  * Explicit options win over the `VOICE_VAULT_PIECE_*` environment variables,
  * which win over {@link DEFAULT_PIECE_OPTIONS}. An invalid combination (for
@@ -264,4 +272,54 @@ export function createPieceCutter(options = {}) {
 export function cutPieces(pcm, options = {}) {
   const cutter = createPieceCutter(options);
   return [...cutter.push(pcm), ...cutter.finish()];
+}
+
+/**
+ * Shorten every long pause in audio about to be sent to the model.
+ *
+ * The ASR model can return nothing for speech that sits next to a long
+ * silence inside one request: recording 731ae919 lost the 14 s that followed
+ * a 9 s pause inside a 41 s piece, and short phrases between long pauses came
+ * back empty even when cut into pieces of their own. With every run of at
+ * least `longPauseMs` (default 2 s) below -50 dBFS shortened to its first and
+ * last `PAUSE_KEEP_MS`, all of them transcribed in full.
+ *
+ * Only audio below the absolute threshold is removed, so speech and loud
+ * background noise always reach the model. Piece boundaries and the cache
+ * keys built from them are unaffected: this runs on each request's audio.
+ *
+ * @param {Int16Array} pcm audio of one request
+ * @param {object} [options] see {@link resolvePieceOptions}
+ * @returns {Int16Array} `pcm` itself when nothing was shortened
+ */
+export function squeezePauses(pcm, options = {}) {
+  const resolved = resolvePieceOptions(options);
+  if (!(resolved.longPauseMs > 0) || !pcm || pcm.length === 0) return pcm;
+  const { sampleRate } = resolved;
+  const longSamples = Math.round((sampleRate * resolved.longPauseMs) / 1000);
+  const keepSamples = Math.round((sampleRate * PAUSE_KEEP_MS) / 1000);
+  if (pcm.length < longSamples) return pcm;
+
+  const { levels, frameSamples, hopSamples } = frameLevelsDb(pcm, sampleRate);
+  const kept = [];
+  let position = 0;
+  let runStart = -1;
+  for (let index = 0; index <= levels.length; index += 1) {
+    if (index < levels.length && levels[index] < ABSOLUTE_THRESHOLD_DB) {
+      if (runStart < 0) runStart = index;
+      continue;
+    }
+    if (runStart >= 0) {
+      const pauseStart = runStart * hopSamples;
+      const pauseEnd = Math.min(pcm.length, (index - 1) * hopSamples + frameSamples);
+      if (pauseEnd - pauseStart >= longSamples) {
+        kept.push(pcm.subarray(position, pauseStart + keepSamples));
+        position = pauseEnd - keepSamples;
+      }
+      runStart = -1;
+    }
+  }
+  if (kept.length === 0) return pcm;
+  kept.push(pcm.subarray(position));
+  return Int16Array.from(readRange(kept, 0, kept.reduce((sum, part) => sum + part.length, 0)));
 }

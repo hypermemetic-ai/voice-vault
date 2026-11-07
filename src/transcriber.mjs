@@ -6,7 +6,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { prepareAudioForTranscription } from "/home/qqp/projects/qq-dictation/src/recognizer.mjs";
 import { decodeWav, encodePcm16Wav } from "./wav.mjs";
-import { cutPieces, resolvePieceOptions } from "./chunker.mjs";
+import { cutPieces, resolvePieceOptions, squeezePauses } from "./chunker.mjs";
 import { gateAudio, summarizeGate } from "./gate.mjs";
 import { createSpeakerEmbedder } from "./speaker.mjs";
 import { loadVoiceProfile, profileCompatibility } from "./profile.mjs";
@@ -622,7 +622,16 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
     const audioSentMs = Math.round((audioToTranscribe.length - 44) / 32);
 
     if (!decodedAudio || decodedAudio.samples.length <= maxPieceSamples) {
-      const resp = await transcribe(filteredWavPath, reqId);
+      // Long pauses are shortened in what the model hears (squeezePauses).
+      let modelWavPath = filteredWavPath;
+      if (decodedAudio) {
+        const squeezed = squeezePauses(decodedAudio.samples, pieceOptions);
+        if (squeezed !== decodedAudio.samples) {
+          modelWavPath = path.join(tmpDir, "model.wav");
+          fs.writeFileSync(modelWavPath, encodePcm16Wav(squeezed, pieceOptions.sampleRate));
+        }
+      }
+      const resp = await transcribe(modelWavPath, reqId);
       const rawText = (resp && typeof resp.text === "string") ? resp.text : "";
       const cleanText = cleanTranscript(rawText);
 
@@ -663,7 +672,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
         resp = cached;
       } else {
         const pieceWavPath = path.join(tmpDir, `piece-${index}.wav`);
-        fs.writeFileSync(pieceWavPath, encodePcm16Wav(piecePcm, pieceOptions.sampleRate));
+        fs.writeFileSync(pieceWavPath, encodePcm16Wav(squeezePauses(piecePcm, pieceOptions), pieceOptions.sampleRate));
         try {
           resp = await transcribe(pieceWavPath, `${reqId}-p${index}`);
         } catch (error) {
