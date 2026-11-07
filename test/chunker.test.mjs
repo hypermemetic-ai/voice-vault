@@ -16,6 +16,7 @@ import {
   createPieceCutter,
   cutPieces,
   resolvePieceOptions,
+  squeezePauses,
 } from "../src/chunker.mjs";
 
 const SAMPLE_RATE = 16000;
@@ -185,64 +186,32 @@ test("one call and 37 irregular pushes produce identical boundaries", () => {
   assert.deepEqual(incremental, batch);
 });
 
-test("a long pause inside a final piece is a cut in its middle", () => {
-  // The shape that lost a dictation's last statement: 18 s of speech, a 9 s
-  // pause, then 14 s of speech, all within one 45 s piece.
-  const pcm = concat([burst(18), silence(9), burst(14)]);
-  const pieces = cutPieces(pcm, { sampleRate: SAMPLE_RATE });
+test("long pauses are shortened to one second, speech kept exactly", () => {
+  const before = burst(18);
+  const after = burst(14, 5000, 220);
+  const pcm = concat([silence(3), before, silence(9), after, silence(1.5)]);
+  const squeezed = squeezePauses(pcm, { sampleRate: SAMPLE_RATE });
 
-  assert.equal(pieces.length, 2);
-  assert.equal(pieces[0].startSample, 0);
-  assert.equal(pieces[0].forced, false);
-  assert.ok(
-    Math.abs(ms(pieces[0].endSample) - 22500) <= 50,
-    `cut at ${ms(pieces[0].endSample)}ms is not the middle of the 18-27 s pause`,
-  );
-  assert.deepEqual(pieces[1], { startSample: pieces[0].endSample, endSample: pcm.length, forced: false });
+  // 3 s lead -> 1 s, 9 s pause -> 1 s, the 1.5 s tail is short and stays.
+  assert.ok(Math.abs(ms(squeezed.length) - 35500) <= 50, `squeezed to ${ms(squeezed.length)}ms`);
+  const sameSamples = (part) => {
+    const at = squeezed.findIndex((value, index) => value === part[0] && squeezed[index + 1] === part[1] && squeezed[index + 2] === part[2]);
+    return at >= 0 && squeezed.subarray(at, at + part.length).every((value, index) => value === part[index]);
+  };
+  assert.ok(sameSamples(before.subarray(1)), "speech before the pause is intact");
+  assert.ok(sameSamples(after.subarray(1)), "speech after the pause is intact");
 });
 
-test("short pauses, leading and trailing silence are not long-pause cuts", () => {
-  const shortPause = concat([burst(10), silence(1.5), burst(10)]);
-  assert.equal(cutPieces(shortPause, { sampleRate: SAMPLE_RATE }).length, 1);
+test("short pauses, quiet room tone and longPauseMs 0 leave audio untouched", () => {
+  const shortPause = concat([burst(10), silence(1.9), burst(10)]);
+  assert.equal(squeezePauses(shortPause, { sampleRate: SAMPLE_RATE }), shortPause);
 
-  const edges = concat([silence(4), burst(10), silence(6)]);
-  assert.deepEqual(cutPieces(edges, { sampleRate: SAMPLE_RATE }), [
-    { startSample: 0, endSample: edges.length, forced: false },
-  ]);
-});
+  const roomTone = burst(6, 300, 90); // about -40 dBFS, above the -50 dBFS threshold
+  const toned = concat([burst(5), roomTone, burst(5)]);
+  assert.equal(squeezePauses(toned, { sampleRate: SAMPLE_RATE }), toned);
 
-test("a long-pause cut is final as soon as speech resumes", () => {
-  const cutter = createPieceCutter({ sampleRate: SAMPLE_RATE });
-  assert.deepEqual(cutter.push(concat([burst(5), silence(3)])), [], "the pause has not ended yet");
-  const pieces = cutter.push(burst(1));
-  assert.equal(pieces.length, 1, "the piece before the pause is emitted without 45 s of audio");
-  assert.ok(Math.abs(ms(pieces[0].endSample) - 6500) <= 50);
-  assert.deepEqual(cutter.finish(), [
-    { startSample: pieces[0].endSample, endSample: seconds(9), forced: false },
-  ]);
-});
-
-test("long-pause cuts give identical boundaries for one call and many pushes", () => {
-  const pcm = concat([
-    burst(7), silence(2.5), burst(30), silence(5), tone(50), silence(3), burst(12), silence(8),
-  ]);
-  const batch = cutPieces(pcm, { sampleRate: SAMPLE_RATE });
-  assert.ok(batch.length >= 4, `expected several pieces, got ${batch.length}`);
-
-  for (const step of [1601, 16000, 48000 + 2, 99998]) {
-    const cutter = createPieceCutter({ sampleRate: SAMPLE_RATE });
-    const incremental = [];
-    for (let offset = 0; offset < pcm.length; offset += step) {
-      incremental.push(...cutter.push(pcm.subarray(offset, offset + step)));
-    }
-    incremental.push(...cutter.finish());
-    assert.deepEqual(incremental, batch, `push size ${step}`);
-  }
-});
-
-test("longPauseMs 0 turns long-pause cuts off", () => {
-  const pcm = concat([burst(18), silence(9), burst(14)]);
-  assert.equal(cutPieces(pcm, { sampleRate: SAMPLE_RATE, longPauseMs: 0 }).length, 1);
+  const longPause = concat([burst(5), silence(5), burst(5)]);
+  assert.equal(squeezePauses(longPause, { sampleRate: SAMPLE_RATE, longPauseMs: 0 }), longPause);
 });
 
 test("an invalid environment combination falls back to the defaults", async () => {

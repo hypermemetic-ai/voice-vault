@@ -6,7 +6,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { prepareAudioForTranscription } from "/home/qqp/projects/qq-dictation/src/recognizer.mjs";
 import { decodeWav, encodePcm16Wav } from "./wav.mjs";
-import { cutPieces, resolvePieceOptions } from "./chunker.mjs";
+import { cutPieces, resolvePieceOptions, squeezePauses } from "./chunker.mjs";
 import { gateAudio, summarizeGate } from "./gate.mjs";
 import { createSpeakerEmbedder } from "./speaker.mjs";
 import { loadVoiceProfile, profileCompatibility } from "./profile.mjs";
@@ -611,19 +611,27 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
 
     fs.writeFileSync(filteredWavPath, audioToTranscribe);
 
-    // 4. Bounded pieces (design D1-D3). Audio that is one piece (no longer
-    //    than the maximum and without a long pause) keeps the original
-    //    single-request path; only its response gains `pieces`.
+    // 4. Bounded pieces (design D1-D3). Audio within one piece keeps the
+    //    original single-request path; only its response gains `pieces`.
     const transcribe = options.transcribe || defaultTranscribe;
     const decodedAudio = decodeWav(audioToTranscribe);
     const pieceOptions = resolvePieceOptions(
       decodedAudio ? { sampleRate: decodedAudio.sampleRate } : {},
     );
+    const maxPieceSamples = Math.round((pieceOptions.sampleRate * pieceOptions.maxMs) / 1000);
     const audioSentMs = Math.round((audioToTranscribe.length - 44) / 32);
-    const pieces = decodedAudio ? cutPieces(decodedAudio.samples, pieceOptions) : [];
 
-    if (pieces.length <= 1) {
-      const resp = await transcribe(filteredWavPath, reqId);
+    if (!decodedAudio || decodedAudio.samples.length <= maxPieceSamples) {
+      // Long pauses are shortened in what the model hears (squeezePauses).
+      let modelWavPath = filteredWavPath;
+      if (decodedAudio) {
+        const squeezed = squeezePauses(decodedAudio.samples, pieceOptions);
+        if (squeezed !== decodedAudio.samples) {
+          modelWavPath = path.join(tmpDir, "model.wav");
+          fs.writeFileSync(modelWavPath, encodePcm16Wav(squeezed, pieceOptions.sampleRate));
+        }
+      }
+      const resp = await transcribe(modelWavPath, reqId);
       const rawText = (resp && typeof resp.text === "string") ? resp.text : "";
       const cleanText = cleanTranscript(rawText);
 
@@ -644,6 +652,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
     }
 
     // 5. Sequential per-piece cascade (D4), forced-seam dedup and join (D5).
+    const pieces = cutPieces(decodedAudio.samples, pieceOptions);
     const pieceBackends = [];
     const pieceAttempts = [];
     let joined = "";
@@ -663,7 +672,7 @@ export async function transcribeAudioFile(rawAudioPath, reqId = `req-${Date.now(
         resp = cached;
       } else {
         const pieceWavPath = path.join(tmpDir, `piece-${index}.wav`);
-        fs.writeFileSync(pieceWavPath, encodePcm16Wav(piecePcm, pieceOptions.sampleRate));
+        fs.writeFileSync(pieceWavPath, encodePcm16Wav(squeezePauses(piecePcm, pieceOptions), pieceOptions.sampleRate));
         try {
           resp = await transcribe(pieceWavPath, `${reqId}-p${index}`);
         } catch (error) {

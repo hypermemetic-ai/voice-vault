@@ -522,44 +522,51 @@ test("a short recording is one request and reports one piece", async () => {
   }
 });
 
-test("a recording with speech reaches the model whole, silence included", async () => {
+test("a recording with speech reaches the model whole, long silences shortened", async () => {
   const dir = tempDir("whole-recording");
-  const file = writeSyntheticWav(dir, "whole.wav", concatPcm([silencePcm(4), speechBurst(3), silencePcm(4)]));
-  const calls = [];
+  // Quiet room tone (about -40 dBFS) is above the pause threshold and stays.
+  const roomTone = speechBurst(4, 300, 90);
+  const cases = [
+    { name: "silence", pcm: concatPcm([silencePcm(4), speechBurst(3), silencePcm(4)]), expectedMs: 5_000 },
+    { name: "tone", pcm: concatPcm([roomTone, speechBurst(3), roomTone]), expectedMs: 11_000 },
+  ];
   try {
-    const result = await transcribeAudioFile(file, "whole-recording", {
-      speakerGate: false,
-      transcribe: async (wavPath) => {
-        calls.push(wavDurationMs(wavPath));
-        return { text: "Spoken words.", transcribe_ms: 5, backend: "daemon_gpu" };
-      },
-    });
-    assert.equal(calls.length, 1);
-    assert.ok(calls[0] > 10_900 && calls[0] <= 11_000, `model received ${calls[0]}ms of 11000ms`);
-    assert.ok(result.audioSentMs > 10_900);
-    assert.equal(result.text, "Spoken words.");
+    for (const { name, pcm, expectedMs } of cases) {
+      const file = writeSyntheticWav(dir, `${name}.wav`, pcm);
+      const calls = [];
+      const result = await transcribeAudioFile(file, `whole-${name}`, {
+        speakerGate: false,
+        transcribe: async (wavPath) => {
+          calls.push(wavDurationMs(wavPath));
+          return { text: "Spoken words.", transcribe_ms: 5, backend: "daemon_gpu" };
+        },
+      });
+      assert.equal(calls.length, 1);
+      assert.ok(Math.abs(calls[0] - expectedMs) <= 60, `${name}: model received ${calls[0]}ms, expected ${expectedMs}ms`);
+      assert.ok(result.audioSentMs > 10_900, "audioSentMs reports the speech audio, not the shortened request");
+      assert.equal(result.text, "Spoken words.");
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("a short recording with a long pause is split at the pause", async () => {
-  const dir = tempDir("piece-long-pause");
+test("a long pause inside a piece reaches the model as one second", async () => {
+  const dir = tempDir("long-pause");
+  // The shape that lost a dictation's last statement: speech, 9 s pause, speech.
   const file = writeSyntheticWav(dir, "pause.wav", concatPcm([speechBurst(18), silencePcm(9), speechBurst(14)]));
   const calls = [];
   try {
     const result = await transcribeAudioFile(file, "long-pause", {
       speakerGate: false,
-      transcribe: async (wavPath, reqId) => {
-        calls.push({ reqId, durationMs: wavDurationMs(wavPath) });
-        return { text: calls.length === 1 ? "Before." : "After.", transcribe_ms: 5, backend: "daemon_gpu" };
+      transcribe: async (wavPath) => {
+        calls.push(wavDurationMs(wavPath));
+        return { text: "All of it.", transcribe_ms: 5, backend: "daemon_gpu" };
       },
     });
-    assert.deepEqual(calls.map((call) => call.reqId), ["long-pause-p0", "long-pause-p1"]);
-    assert.ok(Math.abs(calls[0].durationMs - 22_500) <= 50, `first piece ${calls[0].durationMs}ms`);
-    assert.ok(Math.abs(calls[1].durationMs - 18_500) <= 50, `second piece ${calls[1].durationMs}ms`);
-    assert.equal(result.pieces, 2);
-    assert.equal(result.text, "Before. After.");
+    assert.equal(calls.length, 1);
+    assert.ok(Math.abs(calls[0] - 33_000) <= 60, `model received ${calls[0]}ms, expected 33000ms`);
+    assert.equal(result.pieces, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
