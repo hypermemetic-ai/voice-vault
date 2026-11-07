@@ -165,9 +165,11 @@ Speech audio longer than one piece is cut at the quietest pause between 20 and
 40 s from the piece start and never later than 45 s. A window without a pause
 cuts at 45 s and starts the next piece 1.5 s earlier; words repeated across that
 forced seam are removed when the pieces join. A pause seam is never
-deduplicated. Each piece runs through the cascade on its own, so a fallback only
-repeats the failed piece, and the joined text is cleaned once. Recordings that
-fit in one piece stay a single request.
+deduplicated. A pause of 2 s or more is always a cut, at its middle, in any
+piece and in short recordings too: the model can return nothing for speech that
+follows a long silence inside one request. Each piece runs through the cascade
+on its own, so a fallback only repeats the failed piece, and the joined text is
+cleaned once. Recordings that fit in one piece stay a single request.
 
 The warm daemon refuses WAV input longer than `WHISPER_MAX_AUDIO_MS` (default
 120 s) with HTTP 413, so an oversized request cannot crash the model process.
@@ -383,6 +385,7 @@ host (AMD Ryzen 7 250 + RTX A2000, ONNX CPU provider, 3.8 s utterance):
 | `VOICE_VAULT_PIECE_WINDOW_START_MS` | `20000` | Start of the pause-search window |
 | `VOICE_VAULT_PIECE_WINDOW_END_MS` | `40000` | End of the pause-search window |
 | `VOICE_VAULT_PIECE_OVERLAP_MS` | `1500` | Overlap before a forced cut |
+| `VOICE_VAULT_PIECE_LONG_PAUSE_MS` | `2000` | A pause this long is always a cut; `0` turns it off |
 | `HANDY_BIN` | `/home/qqp/.local/bin/handy` | Executable used by the direct tiers |
 | `HANDY_DEVICE_INDEX_GPU` | `1` | `handy --list-devices` index of the RTX A2000 |
 | `HANDY_DEVICE_INDEX_IGPU` | `0` | Index of the Radeon 780M iGPU |

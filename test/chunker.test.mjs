@@ -27,6 +27,7 @@ const ENV_KEYS = [
   "VOICE_VAULT_PIECE_WINDOW_START_MS",
   "VOICE_VAULT_PIECE_WINDOW_END_MS",
   "VOICE_VAULT_PIECE_OVERLAP_MS",
+  "VOICE_VAULT_PIECE_LONG_PAUSE_MS",
 ];
 
 async function withEnv(values, fn) {
@@ -184,6 +185,66 @@ test("one call and 37 irregular pushes produce identical boundaries", () => {
   assert.deepEqual(incremental, batch);
 });
 
+test("a long pause inside a final piece is a cut in its middle", () => {
+  // The shape that lost a dictation's last statement: 18 s of speech, a 9 s
+  // pause, then 14 s of speech, all within one 45 s piece.
+  const pcm = concat([burst(18), silence(9), burst(14)]);
+  const pieces = cutPieces(pcm, { sampleRate: SAMPLE_RATE });
+
+  assert.equal(pieces.length, 2);
+  assert.equal(pieces[0].startSample, 0);
+  assert.equal(pieces[0].forced, false);
+  assert.ok(
+    Math.abs(ms(pieces[0].endSample) - 22500) <= 50,
+    `cut at ${ms(pieces[0].endSample)}ms is not the middle of the 18-27 s pause`,
+  );
+  assert.deepEqual(pieces[1], { startSample: pieces[0].endSample, endSample: pcm.length, forced: false });
+});
+
+test("short pauses, leading and trailing silence are not long-pause cuts", () => {
+  const shortPause = concat([burst(10), silence(1.5), burst(10)]);
+  assert.equal(cutPieces(shortPause, { sampleRate: SAMPLE_RATE }).length, 1);
+
+  const edges = concat([silence(4), burst(10), silence(6)]);
+  assert.deepEqual(cutPieces(edges, { sampleRate: SAMPLE_RATE }), [
+    { startSample: 0, endSample: edges.length, forced: false },
+  ]);
+});
+
+test("a long-pause cut is final as soon as speech resumes", () => {
+  const cutter = createPieceCutter({ sampleRate: SAMPLE_RATE });
+  assert.deepEqual(cutter.push(concat([burst(5), silence(3)])), [], "the pause has not ended yet");
+  const pieces = cutter.push(burst(1));
+  assert.equal(pieces.length, 1, "the piece before the pause is emitted without 45 s of audio");
+  assert.ok(Math.abs(ms(pieces[0].endSample) - 6500) <= 50);
+  assert.deepEqual(cutter.finish(), [
+    { startSample: pieces[0].endSample, endSample: seconds(9), forced: false },
+  ]);
+});
+
+test("long-pause cuts give identical boundaries for one call and many pushes", () => {
+  const pcm = concat([
+    burst(7), silence(2.5), burst(30), silence(5), tone(50), silence(3), burst(12), silence(8),
+  ]);
+  const batch = cutPieces(pcm, { sampleRate: SAMPLE_RATE });
+  assert.ok(batch.length >= 4, `expected several pieces, got ${batch.length}`);
+
+  for (const step of [1601, 16000, 48000 + 2, 99998]) {
+    const cutter = createPieceCutter({ sampleRate: SAMPLE_RATE });
+    const incremental = [];
+    for (let offset = 0; offset < pcm.length; offset += step) {
+      incremental.push(...cutter.push(pcm.subarray(offset, offset + step)));
+    }
+    incremental.push(...cutter.finish());
+    assert.deepEqual(incremental, batch, `push size ${step}`);
+  }
+});
+
+test("longPauseMs 0 turns long-pause cuts off", () => {
+  const pcm = concat([burst(18), silence(9), burst(14)]);
+  assert.equal(cutPieces(pcm, { sampleRate: SAMPLE_RATE, longPauseMs: 0 }).length, 1);
+});
+
 test("an invalid environment combination falls back to the defaults", async () => {
   // A window past the maximum piece length is the design's example.
   await withEnv({ VOICE_VAULT_PIECE_WINDOW_END_MS: 60000 }, () => {
@@ -202,9 +263,11 @@ test("an invalid environment combination falls back to the defaults", async () =
       VOICE_VAULT_PIECE_WINDOW_START_MS: 12000,
       VOICE_VAULT_PIECE_WINDOW_END_MS: 25000,
       VOICE_VAULT_PIECE_OVERLAP_MS: 1000,
+      VOICE_VAULT_PIECE_LONG_PAUSE_MS: 3000,
     },
     () => {
       const resolved = resolvePieceOptions();
+      assert.equal(resolved.longPauseMs, 3000);
       assert.equal(resolved.maxMs, 30000);
       assert.equal(resolved.windowStartMs, 12000);
       assert.equal(resolved.windowEndMs, 25000);

@@ -9,6 +9,14 @@
  * configured maximum and overlaps the next piece so no word is lost at a hard
  * seam.
  *
+ * A long pause (default 2 s of audio below -50 dBFS) is always a cut, wherever
+ * it falls and however short the piece: the ASR model can return nothing for
+ * the speech that follows a long silence inside one request (a 41 s piece with
+ * a 9 s pause before its last 14 s lost them; either side alone transcribed in
+ * full). The cut sits in the middle of the pause. Its rule uses an absolute
+ * level and needs only audio up to the end of the pause, so the piece before
+ * it is final as soon as speech resumes.
+ *
  * The cutter accepts audio in arbitrary increments. A cut for the piece
  * starting at `s` is decided only once audio beyond `s + maxMs` has been
  * buffered (or at `finish()`), and the pause threshold is derived only from
@@ -27,6 +35,7 @@ export const DEFAULT_PIECE_OPTIONS = Object.freeze({
   windowEndMs: 40000,
   overlapMs: 1500,
   minPauseMs: 200,
+  longPauseMs: 2000,
 });
 
 const ENV_NAMES = Object.freeze({
@@ -34,6 +43,7 @@ const ENV_NAMES = Object.freeze({
   windowStartMs: "VOICE_VAULT_PIECE_WINDOW_START_MS",
   windowEndMs: "VOICE_VAULT_PIECE_WINDOW_END_MS",
   overlapMs: "VOICE_VAULT_PIECE_OVERLAP_MS",
+  longPauseMs: "VOICE_VAULT_PIECE_LONG_PAUSE_MS",
 });
 
 // Pause detection mirrors segmentSpeech (src/vad.mjs): the noise floor is the
@@ -64,11 +74,14 @@ function validOptions(options) {
     && options.overlapMs >= 0
     && options.overlapMs < options.maxMs
     && options.minPauseMs > 0
+    && options.longPauseMs >= 0
     && options.minPauseMs <= options.windowEndMs - options.windowStartMs;
 }
 
 /**
  * Resolve cutter options from explicit values, environment and defaults.
+ *
+ * `longPauseMs: 0` turns long-pause cuts off.
  *
  * Explicit options win over the `VOICE_VAULT_PIECE_*` environment variables,
  * which win over {@link DEFAULT_PIECE_OPTIONS}. An invalid combination (for
@@ -184,6 +197,49 @@ function findPauseCut(span, spanStart, options) {
 }
 
 /**
+ * Find the cut sample for the first long pause after the piece start, or
+ * `null`. A pause is a run of complete frames below the absolute threshold,
+ * at least `longPauseMs` long, that starts after the first frame and ends
+ * before a complete louder frame inside `span`. A run touching the piece start
+ * (the second half of the previous long-pause cut, or leading silence) or the
+ * end of the audio so far is never a cut.
+ *
+ * Only complete frames of `span` are read and the threshold is absolute, so
+ * the result for a prefix of the audio equals the result for any longer audio
+ * once the pause has ended: incremental and batch cutting agree.
+ *
+ * @param {Int16Array} span audio from the piece start, at most one piece long
+ * @param {number} spanStart absolute sample offset of `span`
+ * @param {object} options resolved piece options
+ * @returns {number|null}
+ */
+function findLongPauseCut(span, spanStart, options) {
+  if (!(options.longPauseMs > 0)) return null;
+  const { sampleRate } = options;
+  const longPauseSamples = Math.round((sampleRate * options.longPauseMs) / 1000);
+  if (span.length < longPauseSamples) return null;
+  const { levels, frameSamples, hopSamples } = frameLevelsDb(span, sampleRate);
+  let runStart = -1;
+  for (let index = 0; index < levels.length; index += 1) {
+    const start = index * hopSamples;
+    if (start + frameSamples > span.length) break; // incomplete frame
+    if (levels[index] < ABSOLUTE_THRESHOLD_DB) {
+      if (runStart < 0) runStart = index;
+      continue;
+    }
+    if (runStart > 0) {
+      const pauseStart = runStart * hopSamples;
+      const pauseEnd = (index - 1) * hopSamples + frameSamples;
+      if (pauseEnd - pauseStart >= longPauseSamples) {
+        return spanStart + Math.round((pauseStart + pauseEnd) / 2);
+      }
+    }
+    runStart = -1;
+  }
+  return null;
+}
+
+/**
  * Create an incremental piece cutter.
  *
  * `push(int16)` buffers audio and returns the pieces whose cut is now final;
@@ -204,9 +260,25 @@ export function createPieceCutter(options = {}) {
   let nextStart = 0;
   let finished = false;
 
-  function decideCut() {
+  /** The next piece, or `null` while its cut cannot be final yet. */
+  function decideCut(final) {
     const start = nextStart;
     const remaining = totalSamples - start;
+
+    // A long pause is a cut as soon as speech resumes after it.
+    const longCut = findLongPauseCut(
+      readRange(chunks, start, Math.min(totalSamples, start + maxSamples)),
+      start,
+      resolved,
+    );
+    if (longCut !== null) {
+      nextStart = longCut;
+      return { startSample: start, endSample: longCut, forced: false };
+    }
+
+    // Without finish(), wait until audio beyond the maximum exists so the
+    // last-piece decision can never be made early (incremental determinism).
+    if (!final && remaining <= maxSamples) return null;
 
     // The remainder is known at finish() (or already exceeded the maximum):
     // a remainder within one piece is the last piece.
@@ -232,10 +304,9 @@ export function createPieceCutter(options = {}) {
   function drain(final) {
     const pieces = [];
     while (nextStart < totalSamples) {
-      // Without finish(), wait until audio beyond the maximum exists so the
-      // last-piece decision can never be made early (incremental determinism).
-      if (!final && nextStart + maxSamples >= totalSamples) break;
-      pieces.push(decideCut());
+      const piece = decideCut(final);
+      if (!piece) break;
+      pieces.push(piece);
     }
     return pieces;
   }

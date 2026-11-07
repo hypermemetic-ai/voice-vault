@@ -543,6 +543,28 @@ test("a recording with speech reaches the model whole, silence included", async 
   }
 });
 
+test("a short recording with a long pause is split at the pause", async () => {
+  const dir = tempDir("piece-long-pause");
+  const file = writeSyntheticWav(dir, "pause.wav", concatPcm([speechBurst(18), silencePcm(9), speechBurst(14)]));
+  const calls = [];
+  try {
+    const result = await transcribeAudioFile(file, "long-pause", {
+      speakerGate: false,
+      transcribe: async (wavPath, reqId) => {
+        calls.push({ reqId, durationMs: wavDurationMs(wavPath) });
+        return { text: calls.length === 1 ? "Before." : "After.", transcribe_ms: 5, backend: "daemon_gpu" };
+      },
+    });
+    assert.deepEqual(calls.map((call) => call.reqId), ["long-pause-p0", "long-pause-p1"]);
+    assert.ok(Math.abs(calls[0].durationMs - 22_500) <= 50, `first piece ${calls[0].durationMs}ms`);
+    assert.ok(Math.abs(calls[1].durationMs - 18_500) <= 50, `second piece ${calls[1].durationMs}ms`);
+    assert.equal(result.pieces, 2);
+    assert.equal(result.text, "Before. After.");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a silent recording reports no speech without calling the model", async () => {
   const dir = tempDir("whole-silence");
   const file = writeSyntheticWav(dir, "silence.wav", silencePcm(11));
